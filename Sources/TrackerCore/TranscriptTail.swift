@@ -41,6 +41,14 @@ public final class TranscriptTail {
 
     public var isBusy: Bool { busySince != nil }
 
+    /// Background Bash commands (`run_in_background`) launched by this session, by task id.
+    public private(set) var backgroundTasks: [String: BackgroundTask] = [:]
+    /// The session's own step list since the latest user prompt (desktop `update_plan` or `TodoWrite`).
+    public private(set) var plan: [PlanStep] = []
+    public private(set) var planStart: Date?
+    private var pendingBackground: [String: String] = [:]   // tool_use id -> label
+    private var pendingCommands: [String: String] = [:]
+
     public init(path: String) { self.path = path }
 
     /// Worked time as of `now`. A stale open interval is capped at last activity.
@@ -55,7 +63,8 @@ public final class TranscriptTail {
         offset = 0; partial = Data(); sawFirstLine = false
         firstTimestamp = nil; lastTimestamp = nil; busySince = nil; stateSince = nil
         workedClosed = 0; customTitle = nil; agentName = nil; firstPrompt = nil
-        cwd = nil; gitBranch = nil
+        cwd = nil; gitBranch = nil; backgroundTasks = [:]; pendingBackground = [:]
+        plan = []; planStart = nil
     }
 
     /// Reads any bytes appended since the last call.
@@ -99,7 +108,8 @@ public final class TranscriptTail {
         d.range(of: Data(needle.utf8)) != nil
     }
     private static let wanted = ["\"type\":\"user\"", "\"type\":\"assistant\"", "\"type\":\"system\"",
-                                 "\"type\":\"custom-title\"", "\"type\":\"agent-name\""].map { Data($0.utf8) }
+                                 "\"type\":\"custom-title\"", "\"type\":\"agent-name\"",
+                                 "<task-notification>"].map { Data($0.utf8) }
 
     func ingest(_ line: Data) {
         let first = !sawFirstLine
@@ -127,8 +137,24 @@ public final class TranscriptTail {
             if let b = obj["gitBranch"] as? String, !b.isEmpty { gitBranch = b }
             if type == "user" { handleUser(obj, ts) }
             if type == "assistant" { handleAssistant(obj, ts) }
+        case "queue-operation":
+            if obj["operation"] as? String == "enqueue", let c = obj["content"] as? String { handleNotification(c, ts) }
         default: break
         }
+    }
+
+    private static func match(_ pattern: String, in s: String) -> [String]? {
+        guard let re = try? NSRegularExpression(pattern: pattern), let m = re.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) else { return nil }
+        return (1..<m.numberOfRanges).compactMap { Range(m.range(at: $0), in: s).map { String(s[$0]) } }
+    }
+
+    private func handleNotification(_ c: String, _ ts: Date?) {
+        guard c.contains("<task-notification>"), let id = Self.match("<task-id>([^<]+)</task-id>", in: c)?.first,
+              var t = backgroundTasks[id] else { return }
+        let status = Self.match("<status>([^<]+)</status>", in: c)?.first ?? "completed"
+        t.status = status == "completed" ? .completed : .failed
+        t.end = ts
+        backgroundTasks[id] = t
     }
 
     private func handleUser(_ obj: [String: Any], _ ts: Date) {
@@ -139,10 +165,24 @@ public final class TranscriptTail {
         if let s = content as? String {
             text = s
         } else if let arr = content as? [[String: Any]] {
+            for b in arr where b["type"] as? String == "tool_result" {
+                guard let tid = b["tool_use_id"] as? String, let label = pendingBackground.removeValue(forKey: tid) else { continue }
+                let body: String
+                if let str = b["content"] as? String { body = str }
+                else { body = ((b["content"] as? [[String: Any]]) ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n") }
+                if let m = Self.match("ID: (\\w+)\\. Output is being written to: (\\S+?)\\.? ", in: body + " ") ?? Self.match("ID: (\\w+)\\.? ?Output is being written to: (\\S+)", in: body) {
+                    let out = m[1].hasSuffix(".") ? String(m[1].dropLast()) : m[1]
+                    backgroundTasks[m[0]] = BackgroundTask(id: m[0], label: label, command: pendingCommands[tid] ?? "", start: ts, end: nil, status: .running, outputPath: out)
+                }
+                pendingCommands[tid] = nil
+            }
             onlyToolResults = !arr.isEmpty && arr.allSatisfy { $0["type"] as? String == "tool_result" }
             text = arr.first { $0["type"] as? String == "text" }?["text"] as? String
         }
         if let t = text, t.hasPrefix("[Request interrupted") { goIdle(ts); return }
+        let injected = (text ?? "").hasPrefix("<task-notification") || (text ?? "").hasPrefix("Another Claude session")
+            || (text ?? "").hasPrefix("<system-reminder")
+        if !onlyToolResults, !injected, plan.allSatisfy(\.isDone) { plan = []; planStart = nil }   // a finished plan is replaced on the next prompt; an unfinished one carries over
         if !onlyToolResults, firstPrompt == nil, let t = text {
             firstPrompt = Self.summarise(t)
         }
@@ -150,8 +190,43 @@ public final class TranscriptTail {
     }
 
     private func handleAssistant(_ obj: [String: Any], _ ts: Date) {
+        if let blocks = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] {
+            for b in blocks where b["type"] as? String == "tool_use" {
+                if let input = b["input"] as? [String: Any], let name = b["name"] as? String { applyPlanTool(name, input, ts) }
+            }
+            for b in blocks where b["type"] as? String == "tool_use" && b["name"] as? String == "Bash" {
+                guard let input = b["input"] as? [String: Any], input["run_in_background"] as? Bool == true,
+                      let tid = b["id"] as? String else { continue }
+                let label = (input["description"] as? String) ?? (input["command"] as? String).map { String($0.prefix(60)) } ?? "background command"
+                pendingBackground[tid] = label
+                pendingCommands[tid] = input["command"] as? String ?? ""
+            }
+        }
         let reason = (obj["message"] as? [String: Any])?["stop_reason"] as? String
         if let reason, reason != "tool_use" { goIdle(ts) } else { goBusy(ts) }
+    }
+
+    private func applyPlanTool(_ name: String, _ input: [String: Any], _ ts: Date) {
+        func steps(_ arr: [[String: Any]]) -> [PlanStep] {
+            arr.compactMap { d in (d["content"] as? String).map { PlanStep(content: $0, status: d["status"] as? String ?? "pending") } }
+        }
+        switch name {
+        case "TodoWrite":
+            if let todos = input["todos"] as? [[String: Any]] { plan = steps(todos); if planStart == nil { planStart = ts } }
+        case "mcp__ccd_turn__update_plan":
+            if let items = input["items"] as? [[String: Any]] { plan = steps(items); if planStart == nil { planStart = ts }; return }
+            if input["advance"] as? Bool == true {
+                if let i = plan.firstIndex(where: { $0.status == "in_progress" }) { plan[i].status = "completed" }
+                if let j = plan.firstIndex(where: { $0.status == "pending" }) { plan[j].status = "in_progress" }
+            }
+            for n in (input["done"] as? [Any])?.compactMap({ ($0 as? NSNumber)?.intValue }) ?? [] where n >= 1 && n <= plan.count {
+                plan[n - 1].status = "completed"
+            }
+            if let n = (input["start"] as? NSNumber)?.intValue, n >= 1, n <= plan.count { plan[n - 1].status = "in_progress" }
+        case "mcp__ccd_turn__wrap_up":
+            for i in plan.indices where plan[i].status == "in_progress" { plan[i].status = "completed" }
+        default: break
+        }
     }
 
     private func goBusy(_ ts: Date) {

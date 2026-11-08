@@ -23,7 +23,9 @@ final class TrackerModel: ObservableObject {
     init() {
         UserDefaults.standard.register(defaults: ["notifyOnWaiting": true, "longRunMinutes": 0])
         let home = NSHomeDirectory() + "/.claude"
-        watcher = FSWatcher(paths: [home + "/projects", home + "/sessions"]) { [weak self] in
+        let feedDir = NSHomeDirectory() + "/.claude-progress"
+        try? FileManager.default.createDirectory(atPath: feedDir, withIntermediateDirectories: true)
+        watcher = FSWatcher(paths: [home + "/projects", home + "/sessions", feedDir]) { [weak self] in
             Task { @MainActor in self?.requestRefresh() }
         }
         // Liveness (process exit) produces no file event, so poll cheaply.
@@ -59,17 +61,11 @@ final class TrackerModel: ObservableObject {
         updateTimer()
     }
 
-    var runningCount: Int { sessions.filter { $0.state(at: now) == .working }.count }
+    var runningCount: Int { sessions.filter { [.working, .background].contains($0.state(at: now)) }.count }
 
     private func updateTitle() {
-        let working = sessions.filter { $0.state(at: now) == .working }
-        let new: String
-        if working.isEmpty {
-            new = sessions.contains { $0.alive } ? "0 running" : "Claude"
-        } else {
-            let longest = working.map { $0.timeInState(at: now) }.max() ?? 0
-            new = "\(working.count) running  \(formatDuration(longest, compact: true))"
-        }
+        let working = sessions.filter { [.working, .background].contains($0.state(at: now)) }
+        let new = "\(working.count)"
         if new != title { title = new }
     }
 

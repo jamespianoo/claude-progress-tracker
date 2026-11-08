@@ -64,8 +64,28 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertEqual(t.firstPrompt, "new")
     }
 
+    func planLine(_ t: String, _ input: String) -> String {
+        #"{"type":"assistant","timestamp":"2026-01-01T\#(t)Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"x","name":"mcp__ccd_turn__update_plan","input":\#(input)}]}}"# + "\n"
+    }
+
+    func testPlanProgressAndReset() {
+        append(line("user", "10:00:00.000", content: "\"go\""))
+        append(planLine("10:00:01.000", #"{"items":[{"content":"a","status":"in_progress"},{"content":"b","status":"pending"},{"content":"c","status":"pending"}]}"#))
+        append(planLine("10:00:30.000", #"{"advance":true}"#))
+        append(planLine("10:00:40.000", #"{"done":[3]}"#))
+        let t = TranscriptTail(path: path); t.advance()
+        XCTAssertEqual(t.plan.map(\.status), ["completed", "in_progress", "completed"])
+        append(line("user", "10:05:00.000", content: "\"next thing\""))
+        t.advance()
+        XCTAssertEqual(t.plan.count, 3)                 // unfinished plan carries over
+        append(planLine("10:06:00.000", #"{"done":[2]}"#))
+        append(line("user", "10:07:00.000", content: "\"another\""))
+        t.advance()
+        XCTAssertTrue(t.plan.isEmpty)                   // finished plan is cleared by the next prompt
+    }
+
     func testFormat() {
-        XCTAssertEqual(formatDuration(4320, compact: true), "1h12")
+        XCTAssertEqual(formatDuration(4320, compact: true), "1h12m")
         XCTAssertEqual(formatDuration(192), "3m12s")
     }
 }

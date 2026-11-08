@@ -7,6 +7,9 @@ public final class SessionStore {
     private let claudeDir: String
     private var tails: [String: TranscriptTail] = [:]       // by path
     private var pathCache: [String: String] = [:]            // sessionId -> transcript path
+    private var samples: [String: (t: Date, f: Double)] = [:]   // task id -> first progress sample
+    static let remoteWindow: TimeInterval = 2 * 3600
+    private let scanner = ProcessScanner()
     private var known: [String: SessionInfo] = [:]           // sessions seen alive this run (for "finished")
 
     public init(claudeDir: String = NSHomeDirectory() + "/.claude") { self.claudeDir = claudeDir }
@@ -84,10 +87,91 @@ public final class SessionStore {
         return out.sorted { $0.start > $1.start }
     }
 
+    /// Latest hook event per session id (written by hooks/claude-tracker-hook.sh).
+    func readHookEvents() -> [String: (event: String, at: Date)] {
+        let dir = NSHomeDirectory() + "/.claude-progress/events"
+        var out: [String: (String, Date)] = [:]
+        for n in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where n.hasSuffix(".json") {
+            guard let d = FileManager.default.contents(atPath: dir + "/" + n),
+                  let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                  let sid = o["session_id"] as? String, let ev = o["event"] as? String,
+                  let at = (o["updated"] as? NSNumber)?.doubleValue else { continue }
+            out[sid] = (ev, Date(timeIntervalSince1970: at))
+        }
+        return out
+    }
+
+    /// Feeds written by user scripts. Schema: {"title","cwd","started":epoch,"updated":epoch,
+    /// "stages":[{"name","done","total"}],"now":["..."]}
+    func readFeeds() -> [ProgressFeed] {
+        let dir = NSHomeDirectory() + "/.claude-progress"
+        var out: [ProgressFeed] = []
+        for n in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where n.hasSuffix(".json") {
+            guard let d = FileManager.default.contents(atPath: dir + "/" + n),
+                  let o = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any],
+                  let upd = (o["updated"] as? NSNumber)?.doubleValue, let st = (o["started"] as? NSNumber)?.doubleValue else { continue }
+            let stages = ((o["stages"] as? [[String: Any]]) ?? []).compactMap { s -> ProgressFeed.Stage? in
+                guard let name = s["name"] as? String, let done = (s["done"] as? NSNumber)?.intValue,
+                      let total = (s["total"] as? NSNumber)?.intValue else { return nil }
+                return .init(name: name, done: done, total: total)
+            }
+            out.append(ProgressFeed(id: n, title: o["title"] as? String ?? n, cwd: o["cwd"] as? String ?? "",
+                                    started: Date(timeIntervalSince1970: st), updated: Date(timeIntervalSince1970: upd),
+                                    stages: stages, now: o["now"] as? [String] ?? []))
+        }
+        return out
+    }
+
+    /// Looks for "NN%" or "a / b" in the tail of the task's own output file.
+    func withProgress(_ task: BackgroundTask) -> BackgroundTask {
+        var t = task
+        guard t.status == .running else { return t }
+        let files = [t.outputPath]   // only the task's own output: log files named in the command are too ambiguous
+        for f in files {
+            guard let fh = FileHandle(forReadingAtPath: f) else { continue }
+            defer { try? fh.close() }
+            let size = (try? fh.seekToEnd()) ?? 0
+            try? fh.seek(toOffset: size > 8192 ? size - 8192 : 0)
+            guard let d = try? fh.readToEnd(), let text = String(data: d, encoding: .utf8) else { continue }
+            if let (frac, label) = Self.lastProgress(in: text) {
+                t.progress = frac; t.progressText = label
+                let now = Date()
+                if let s0 = samples[t.id] {
+                    let dt = now.timeIntervalSince(s0.t), df = frac - s0.f
+                    if dt > 30, df > 0 { t.eta = (1 - frac) * dt / df }
+                } else { samples[t.id] = (now, frac) }
+                break
+            }
+        }
+        return t
+    }
+
+    static func lastProgress(in text: String) -> (Double, String)? {
+        let patterns: [(String, (NSTextCheckingResult, String) -> (Double, String)?)] = [
+            ("(\\d+)\\s*/\\s*(\\d+)", { m, s in
+                guard let a = Range(m.range(at: 1), in: s), let b = Range(m.range(at: 2), in: s),
+                      let x = Double(s[a]), let y = Double(s[b]), y > 0, x <= y else { return nil }
+                return (x / y, "\(s[a]) / \(s[b])") }),
+            ("(\\d{1,3}(?:\\.\\d+)?)\\s*%", { m, s in
+                guard let a = Range(m.range(at: 1), in: s), let x = Double(s[a]), x <= 100 else { return nil }
+                return (x / 100, "\(s[a])%") }),
+        ]
+        var best: (Int, Double, String)?
+        for (pat, f) in patterns {
+            guard let re = try? NSRegularExpression(pattern: pat) else { continue }
+            for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+                if let r = f(m, text), m.range.location >= (best?.0 ?? -1) { best = (m.range.location, r.0, r.1) }
+            }
+        }
+        return best.map { ($0.1, $0.2) }
+    }
+
     /// Re-reads appended transcript bytes and returns the current rows, newest activity first.
     public func refresh() -> [SessionInfo] {
         var result: [String: SessionInfo] = [:]
         var liveIDs = Set<String>()
+        let feeds = readFeeds()
+        let hookEvents = readHookEvents()
         for e in registry() where Self.isAlive(e) {
             liveIDs.insert(e.sessionId)
             guard let path = transcriptPath(e) else { continue }
@@ -97,11 +181,57 @@ public final class SessionStore {
             let last = t.lastTimestamp ?? first
             let cwd = t.cwd ?? e.cwd
             let title = t.customTitle ?? e.name ?? t.agentName ?? t.firstPrompt ?? (cwd as NSString).lastPathComponent
-            result[e.sessionId] = SessionInfo(
+            var info = SessionInfo(
                 id: e.sessionId, pid: e.pid, cwd: cwd, branch: t.gitBranch, title: title,
                 start: first, lastActivity: last, busySince: t.busySince,
                 stateSince: t.stateSince ?? first, workedClosed: t.workedClosed,
                 alive: true, subagents: subagents(for: path))
+            info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
+            info.plan = t.plan; info.planStart = t.planStart
+            info.feeds = feeds.filter { !$0.cwd.isEmpty && $0.cwd == cwd }
+            // Only pay for ps/lsof when this session is doing something.
+            if [.working, .background].contains(info.state(at: Date())) {
+                info.procs = scanner.subprocesses(sessionPid: e.pid, cwd: cwd).prefix(12).map { sp in
+                    var sp = sp
+                    // Match "name  frame a/b" lines from a feed to a process whose command mentions the name's first part.
+                    let cmd = scanner.commandLine(sp.id)?.lowercased().replacingOccurrences(of: " ", with: "-") ?? ""
+                    outer: for f in info.feeds { for line in f.now {
+                        let name = line.split(separator: " ").first.map(String.init) ?? ""
+                        let key = name.split(separator: "_").first.map { $0.lowercased() } ?? ""
+                        if !key.isEmpty, cmd.contains(key), let (frac, txt) = Self.lastProgress(in: String(line.dropFirst(name.count))) {
+                            sp.progress = frac; sp.progressText = txt; break outer
+                        }
+                    } }
+                    return sp
+                }
+            }
+            if let h = hookEvents[e.sessionId] { info.hookEvent = h.event; info.hookAt = h.at }
+            result[e.sessionId] = info
+        }
+        // Desktop-app SSH sessions: no local process, so "alive" means the transcript was written recently.
+        let root = claudeDir + "/projects"
+        let cutoff = Date().addingTimeInterval(-Self.remoteWindow)
+        for d in (try? FileManager.default.contentsOfDirectory(atPath: root)) ?? [] where d.hasPrefix("ssh-") {
+            let dir = root + "/" + d
+            for n in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] where n.hasSuffix(".jsonl") && !n.hasPrefix("agent-") {
+                let path = dir + "/" + n
+                guard let mtime = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date, mtime > cutoff else { continue }
+                let sid = String(n.dropLast(6))
+                if result[sid] != nil { continue }
+                let t = tail(path); t.advance()
+                guard !t.missing, let first = t.firstTimestamp else { continue }
+                let cwd = t.cwd ?? ""
+                let title = t.customTitle ?? t.agentName ?? t.firstPrompt ?? (cwd as NSString).lastPathComponent
+                var info = SessionInfo(id: sid, pid: 0, cwd: cwd, branch: t.gitBranch, title: title, start: first,
+                                       lastActivity: t.lastTimestamp ?? first, busySince: t.busySince,
+                                       stateSince: t.stateSince ?? first, workedClosed: t.workedClosed,
+                                       alive: true, subagents: subagents(for: path))
+                info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
+                info.remote = true
+                info.plan = t.plan; info.planStart = t.planStart
+                if let h = hookEvents[sid] { info.hookEvent = h.event; info.hookAt = h.at }
+                result[sid] = info; liveIDs.insert(sid)
+            }
         }
         // Sessions that were alive earlier in this run and have now exited.
         let gone = known.filter { !liveIDs.contains($0.key) }
@@ -112,7 +242,7 @@ public final class SessionStore {
                                 workedClosed: s.worked(at: s.lastActivity), alive: false, subagents: s.subagents)
             known[id] = f; result[id] = f
         }
-        for (id, s) in result where s.alive { known[id] = s }
+        for (id, s) in result where s.alive && !s.remote { known[id] = s }
         return result.values.sorted { $0.lastActivity > $1.lastActivity }
     }
 }

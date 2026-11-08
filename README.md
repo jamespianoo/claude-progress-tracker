@@ -1,12 +1,15 @@
 # Claude Session Tracker
 
-Menu-bar macOS app (Swift/SwiftUI, no Dock icon) showing every live Claude Code session: state, time in state,
-total duration, time actually worked, and its subagents. Menu-bar title: `3 running  1h12`.
+Menu-bar macOS app (Swift/SwiftUI, no Dock icon). The icon is the Claude mark plus the number of sessions that are running.
+The popover is deliberately simple: each active session (working, running background tasks/agents, or asking you
+something) shows its name, elapsed time and one progress bar with ETA. Everything idle sits in a collapsed
+"Idle (n)" dropdown at the bottom.
 
 Read-only and offline: it only reads `~/.claude/sessions/*.json` (live-session registry) and
 `~/.claude/projects/**.jsonl` (transcripts, tailed by byte offset, FSEvents + 10 s liveness poll).
 Nothing is written to `~/.claude` and there is no network code. No hooks needed.
 
+    ./install-hooks.sh                                        # optional: Claude Code hooks (see below)
     ./build-app.sh && open build/ClaudeSessionTracker.app     # build and run
     swift test                                                # state-machine tests
     .build/debug/ClaudeSessionTracker --dump                  # print the current picture and exit
@@ -23,3 +26,39 @@ Nothing is written to `~/.claude` and there is no network code. No hooks needed.
 - Subagent "failed" is not detectable from transcripts; shown as "stopped" if it went silent mid-turn.
 - Background shell tasks and progress bars are not shown (no source in transcripts).
 - A session that exits is shown as finished until the app restarts (or 1 h), then disappears.
+
+## Sub-processes
+Under each active session the app lists what it is running: processes whose working directory is inside the
+session's folder (this catches detached `nohup`/`caffeinate` workers that are not children of Claude) plus
+descendants of the session process, reduced to the top-level work (no wrapper shells, helpers or Chrome processes),
+each with its elapsed time. If a progress feed's `now` lines look like `oxford-circus_x  frame 203/720`, the matching
+process gets a bar. Found with `ps` + `lsof` every ~10 s, only while a session is active.
+
+## Progress bars and ETA
+A bar needs a source. The tracker reads two, both outside `~/.claude`:
+1. **Task output**: a background Bash command whose own output contains `NN%` or `a / b`.
+2. **Progress feed**: any script can write `~/.claude-progress/<name>.json` (refresh at least every 2 min; older is ignored):
+
+       {"title":"RAILS RE-BAKE","cwd":"/path/of/the/claude/session","started":1794152240,"updated":1794156500,
+        "stages":[{"name":"follow","done":61,"total":140},{"name":"cab","done":0,"total":279}]}
+
+   It attaches to the session whose working directory equals `cwd`. ETA = remaining items / (items done since `started`).
+   Without a source the row shows an indeterminate bar.
+
+## Claude Code hooks (optional, more precise "needs you")
+Transcripts cannot tell that Claude is blocked on a permission prompt. Hooks can: `./install-hooks.sh` copies
+`hooks/claude-tracker-hook.sh` to `~/.claude-progress/hook.sh` and adds it to `~/.claude/settings.json` for
+`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `SubagentStop` and `SessionEnd`. Each event writes
+`~/.claude-progress/events/<session_id>.json`; a `Notification` after the last transcript activity shows the session
+as "needs you". It backs up your settings first (`settings.json.tracker-backup`), prints the diff, is safe to re-run
+and `./install-hooks.sh --uninstall` removes it. Restart running sessions to pick the hooks up.
+
+### Prompt to set this up in any Claude Code session
+Paste this into Claude Code to have it wire up the same thing (for example on another machine or after cloning):
+
+> Set up the Claude Session Tracker integration from this repo. Run `./install-hooks.sh` and show me the diff of
+> `~/.claude/settings.json` it prints. Then build and launch the app with `./build-app.sh && open build/ClaudeSessionTracker.app`.
+> If I have a long-running script with its own progress display, add a few lines so each refresh writes
+> `~/.claude-progress/<name>.json` in the format described in the README ("Progress bars and ETA"), with `cwd` set to
+> this session's working directory, then tell me to restart the script. Do not write anything inside `~/.claude`
+> other than the hook entries in `settings.json`, and do not send any data off this machine.

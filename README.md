@@ -27,6 +27,12 @@ Nothing is written to `~/.claude` and there is no network code. No hooks needed.
 - Background shell tasks and progress bars are not shown (no source in transcripts).
 - A session that exits is shown as finished until the app restarts (or 1 h), then disappears.
 
+## States and ETA
+- **working**: mid-turn. **running tasks**: background commands, agents or a progress feed with live processes behind them.
+- **paused** (yellow pause icon): unfinished work (open background command or progress feed) but no live process doing it, e.g. workers were killed. Shown with how long it has been paused and its frozen progress.
+- **needs you**: Claude is asking something (needs the hook). Everything else idle is under the "Idle" dropdown.
+- **ETA** (top right, `time left (finish clock)`) appears only when a rate was measured: for progress feeds, the rate over the last ~30 min of observed progress (not since start, which would count paused time). Step-list and agent-count bars show percentage only, because steps are not equal in length. Without 3 min of observed progress there is no ETA rather than a guess.
+
 ## Sub-processes
 Under each active session the app lists what it is running: processes whose working directory is inside the
 session's folder (this catches detached `nohup`/`caffeinate` workers that are not children of Claude) plus

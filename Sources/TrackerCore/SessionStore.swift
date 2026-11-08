@@ -9,6 +9,7 @@ public final class SessionStore {
     private var pathCache: [String: String] = [:]            // sessionId -> transcript path
     private var samples: [String: (t: Date, f: Double)] = [:]   // task id -> first progress sample
     static let remoteWindow: TimeInterval = 2 * 3600
+    private var feedHistory: [String: [(t: Date, done: Int)]] = [:]
     private let scanner = ProcessScanner()
     private var known: [String: SessionInfo] = [:]           // sessions seen alive this run (for "finished")
 
@@ -66,23 +67,32 @@ public final class SessionStore {
         let t = TranscriptTail(path: path); tails[path] = t; return t
     }
 
+    /// Subagent transcripts: `<session>/subagents/` locally, or beside the transcript for desktop-app SSH sessions.
+    /// Only files touched in the last 12 h are read (an SSH folder can hold hundreds of old ones).
     func subagents(for transcript: String) -> [SubagentInfo] {
-        let dir = (transcript as NSString).deletingPathExtension + "/subagents"
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return [] }
+        let parent = (transcript as NSString).deletingLastPathComponent
+        var dirs = [(transcript as NSString).deletingPathExtension + "/subagents"]
+        if (parent as NSString).lastPathComponent.hasPrefix("ssh-") { dirs.append(parent) }
+        let cutoff = Date().addingTimeInterval(-12 * 3600)
         var out: [SubagentInfo] = []
-        for n in names where n.hasPrefix("agent-") && n.hasSuffix(".jsonl") {
-            let t = tail(dir + "/" + n)
-            t.advance()
-            guard let start = t.firstTimestamp, let last = t.lastTimestamp else { continue }
-            let id = String(n.dropFirst(6).dropLast(6))
-            var desc = id, type = "agent"
-            if let d = FileManager.default.contents(atPath: dir + "/agent-\(id).meta.json"),
-               let m = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
-                desc = (m["description"] as? String) ?? desc
-                type = (m["agentType"] as? String) ?? type
+        for dir in dirs {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
+            for n in names where n.hasPrefix("agent-") && n.hasSuffix(".jsonl") {
+                let path = dir + "/" + n
+                guard let m = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date, m > cutoff else { continue }
+                let t = tail(path)
+                t.advance()
+                guard let start = t.firstTimestamp, let last = t.lastTimestamp else { continue }
+                let id = String(n.dropFirst(6).dropLast(6))
+                var desc = id, type = "agent"
+                if let d = FileManager.default.contents(atPath: dir + "/agent-\(id).meta.json"),
+                   let mj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
+                    desc = (mj["description"] as? String) ?? desc
+                    type = (mj["agentType"] as? String) ?? type
+                }
+                out.append(SubagentInfo(id: id, description: desc, agentType: type, start: start,
+                                        lastActivity: last, busy: t.isBusy, workedClosed: t.workedClosed))
             }
-            out.append(SubagentInfo(id: id, description: desc, agentType: type, start: start,
-                                    lastActivity: last, busy: t.isBusy, workedClosed: t.workedClosed))
         }
         return out.sorted { $0.start > $1.start }
     }
@@ -120,6 +130,28 @@ public final class SessionStore {
                                     stages: stages, now: o["now"] as? [String] ?? []))
         }
         return out
+    }
+
+    /// Items/second over the last `window` seconds of samples; nil unless there is at least 3 min of history and progress.
+    static func recentRate(_ samples: [(t: Date, done: Int)], window: TimeInterval = 1800) -> Double? {
+        guard let last = samples.last else { return nil }
+        let inWindow = samples.filter { last.t.timeIntervalSince($0.t) <= window }
+        guard let first = inWindow.first else { return nil }
+        let dt = last.t.timeIntervalSince(first.t), dd = last.done - first.done
+        return (dt >= 180 && dd > 0) ? Double(dd) / dt : nil
+    }
+
+    /// Records each new feed update and attaches the measured recent rate.
+    func withRates(_ feeds: [ProgressFeed]) -> [ProgressFeed] {
+        feeds.map { f in
+            var f = f
+            var h = feedHistory[f.id] ?? []
+            if h.last?.t != f.updated { h.append((f.updated, f.doneTotal)) }
+            h = h.filter { f.updated.timeIntervalSince($0.t) < 7200 }.suffix(1000).map { $0 }
+            feedHistory[f.id] = h
+            f.recentRate = Self.recentRate(h)
+            return f
+        }
     }
 
     /// Looks for "NN%" or "a / b" in the tail of the task's own output file.
@@ -170,7 +202,7 @@ public final class SessionStore {
     public func refresh() -> [SessionInfo] {
         var result: [String: SessionInfo] = [:]
         var liveIDs = Set<String>()
-        let feeds = readFeeds()
+        let feeds = withRates(readFeeds())
         let hookEvents = readHookEvents()
         for e in registry() where Self.isAlive(e) {
             liveIDs.insert(e.sessionId)
@@ -187,10 +219,10 @@ public final class SessionStore {
                 stateSince: t.stateSince ?? first, workedClosed: t.workedClosed,
                 alive: true, subagents: subagents(for: path))
             info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
-            info.plan = t.plan; info.planStart = t.planStart
+            info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt
             info.feeds = feeds.filter { !$0.cwd.isEmpty && $0.cwd == cwd }
             // Only pay for ps/lsof when this session is doing something.
-            if [.working, .background].contains(info.state(at: Date())) {
+            if info.state(at: Date()) == .working || info.hasPendingWork(at: Date()) {
                 info.procs = scanner.subprocesses(sessionPid: e.pid, cwd: cwd).prefix(12).map { sp in
                     var sp = sp
                     // Match "name  frame a/b" lines from a feed to a process whose command mentions the name's first part.
@@ -228,7 +260,7 @@ public final class SessionStore {
                                        alive: true, subagents: subagents(for: path))
                 info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
                 info.remote = true
-                info.plan = t.plan; info.planStart = t.planStart
+                info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt
                 if let h = hookEvents[sid] { info.hookEvent = h.event; info.hookAt = h.at }
                 result[sid] = info; liveIDs.insert(sid)
             }

@@ -46,6 +46,8 @@ public final class TranscriptTail {
     /// The session's own step list since the latest user prompt (desktop `update_plan` or `TodoWrite`).
     public private(set) var plan: [PlanStep] = []
     public private(set) var planStart: Date?
+    /// Time of the latest real (non-injected) user prompt.
+    public private(set) var promptAt: Date?
     private var pendingBackground: [String: String] = [:]   // tool_use id -> label
     private var pendingCommands: [String: String] = [:]
 
@@ -182,6 +184,7 @@ public final class TranscriptTail {
         if let t = text, t.hasPrefix("[Request interrupted") { goIdle(ts); return }
         let injected = (text ?? "").hasPrefix("<task-notification") || (text ?? "").hasPrefix("Another Claude session")
             || (text ?? "").hasPrefix("<system-reminder")
+        if !onlyToolResults, !injected { promptAt = ts }
         if !onlyToolResults, !injected, plan.allSatisfy(\.isDone) { plan = []; planStart = nil }   // a finished plan is replaced on the next prompt; an unfinished one carries over
         if !onlyToolResults, firstPrompt == nil, let t = text {
             firstPrompt = Self.summarise(t)

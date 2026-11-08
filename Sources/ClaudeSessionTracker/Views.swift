@@ -9,7 +9,7 @@ struct ContentView: View {
     @State private var showIdle = false
 
     private var active: [SessionInfo] {
-        model.sessions.filter { [.working, .background, .waiting].contains($0.state(at: model.now)) && ($0.state(at: model.now) != .waiting || $0.needsInput(at: model.now)) }
+        model.sessions.filter { [.working, .background, .paused, .waiting].contains($0.state(at: model.now)) && ($0.state(at: model.now) != .waiting || $0.needsInput(at: model.now)) }
     }
     private var idle: [SessionInfo] {
         let ids = Set(active.map(\.id))
@@ -64,12 +64,13 @@ struct ActiveRow: View {
         let state = session.state(at: now)
         VStack(alignment: .leading, spacing: 4) {
             HStack(spacing: 6) {
-                Circle().fill(state == .waiting ? Color.orange : Color.green).frame(width: 8, height: 8)
+                if state == .paused { Image(systemName: "pause.circle.fill").foregroundStyle(Color.yellow).font(.system(size: 10)) }
+                else { Circle().fill(state == .waiting ? Color.orange : Color.green).frame(width: 8, height: 8) }
                 if session.remote { Image(systemName: "server.rack").font(.caption).foregroundStyle(.secondary) }
                 Text(session.title).fontWeight(.medium).lineLimit(1)
                 Spacer(minLength: 8)
                 Text(state == .waiting ? "needs you" : topRight(state))
-                    .font(.callout.monospacedDigit()).foregroundStyle(state == .waiting ? Color.orange : Color.primary)
+                    .font(.callout.monospacedDigit()).foregroundStyle(state == .waiting ? Color.orange : (state == .paused ? Color.yellow : Color.primary))
             }
             Text(session.project).font(.caption).foregroundStyle(.secondary).padding(.leading, 14)
             if state != .waiting {
@@ -87,7 +88,7 @@ struct ActiveRow: View {
                                 Text(st.name).frame(width: 64, alignment: .leading)
                                 ProgressView(value: st.fraction).progressViewStyle(.linear)
                                 Text([ "\(st.done)/\(st.total)", "\(Int(st.fraction * 100))%",
-                                       f.stageETA(st).map { "ETA \(now.addingTimeInterval($0).formatted(date: .omitted, time: .shortened))" } ?? (st.done >= st.total ? "done" : nil)]
+                                       (state == .paused ? nil : f.stageETA(st)).map { "ETA \(now.addingTimeInterval($0).formatted(date: .omitted, time: .shortened))" } ?? (st.done >= st.total ? "done" : nil)]
                                     .compactMap { $0 }.joined(separator: " · "))
                                     .monospacedDigit().foregroundStyle(Color.primary).fixedSize()
                             }
@@ -101,6 +102,7 @@ struct ActiveRow: View {
 
     /// Time left with the clock time it finishes, e.g. "45m (22:00)"; elapsed time when there is no estimate.
     private func topRight(_ state: RunState) -> String {
+        if state == .paused { return "paused \(formatDuration(session.timeInState(at: now), compact: true))" }
         if let eta = session.progress(at: now)?.eta {
             return "\(formatDuration(eta, compact: true)) (\(now.addingTimeInterval(eta).formatted(date: .omitted, time: .shortened)))"
         }

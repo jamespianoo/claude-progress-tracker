@@ -84,6 +84,19 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertTrue(t.plan.isEmpty)                   // finished plan is cleared by the next prompt
     }
 
+    func testRecentRateIgnoresPausedTime() {
+        let t0 = Date(timeIntervalSince1970: 1_000_000)
+        // 600 items in the first 10 min, then paused for 50 min with no progress.
+        var h: [(t: Date, done: Int)] = []
+        for m in 0...60 { h.append((t0.addingTimeInterval(Double(m) * 60), min(m, 10) * 60)) }
+        XCTAssertNil(SessionStore.recentRate(h))                     // stalled in the last 30 min: no ETA
+        // Resumes at 6 items/min for 10 min: the since-start average would be ~0.16/s, the recent rate is ~0.03/s.
+        for m in 61...70 { h.append((t0.addingTimeInterval(Double(m) * 60), 600 + (m - 60) * 6)) }
+        let r = SessionStore.recentRate(h)!
+        XCTAssertGreaterThan(r, 0.03)
+        XCTAssertLessThan(r, 0.04)
+    }
+
     func testFormat() {
         XCTAssertEqual(formatDuration(4320, compact: true), "1h12m")
         XCTAssertEqual(formatDuration(192), "3m12s")

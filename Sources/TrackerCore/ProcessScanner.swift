@@ -92,6 +92,7 @@ final class ProcessScanner {
         func exe(_ p: ProcInfo) -> String { (p.command.split(separator: " ").first.map(String.init) ?? "" as String as String).split(separator: "/").last.map(String.init) ?? "" }
         let kept = mine.filter { p in
             let e = exe(p)
+            if Self.label(p.command).hasPrefix("progress") { return false }   // dashboards/feed writers are not work
             if e.hasPrefix("(") || Self.ignore.contains(e) || p.command.contains(".app/Contents/") { return false }
             // A shell whose children include another kept-candidate is just a wrapper.
             let hasWorkChild = (byParent[p.pid] ?? []).contains { c in ids.contains(c.pid) && !Self.ignore.contains(exe(c)) }

@@ -15,8 +15,10 @@ public struct ProgressFeed: Identifiable {
     public func isFresh(at now: Date) -> Bool { now.timeIntervalSince(updated) < 120 }
     public var doneTotal: Int { stages.reduce(0) { $0 + $1.done } }
     public var grandTotal: Int { stages.reduce(0) { $0 + $1.total } }
-    /// Items per second since `started`.
-    public var rate: Double { let el = updated.timeIntervalSince(started); return el > 0 ? Double(doneTotal) / el : 0 }
+    /// Items per second over the last ~30 min of observed progress (set by the store); nil if stalled or not yet measured.
+    /// Deliberately not "since started": that would include paused time and overstate the time left.
+    public var recentRate: Double?
+    public var rate: Double { recentRate ?? 0 }
     public var overallETA: TimeInterval? { rate > 0 ? Double(grandTotal - doneTotal) / rate : nil }
     /// Stages are assumed to run in order, so a stage finishes after everything before it plus itself.
     public func stageETA(_ s: Stage) -> TimeInterval? {
@@ -37,7 +39,7 @@ public struct Progress {
 }
 
 public enum RunState: String {
-    case working, background, waiting, idle, finished
+    case working, background, paused, waiting, idle, finished
 }
 
 public struct BackgroundTask: Identifiable {
@@ -100,6 +102,7 @@ public struct SessionInfo: Identifiable {
     /// The session's own step list (plan / TodoWrite) since the latest user prompt.
     public var plan: [PlanStep] = []
     public var planStart: Date?
+    public var promptAt: Date?
 
     public var currentStep: String? { (plan.first { $0.status == "in_progress" } ?? plan.first { !$0.isDone })?.content }
     /// Latest event from the optional Claude Code hook (see hooks/): Notification = Claude is asking the user.
@@ -117,13 +120,15 @@ public struct SessionInfo: Identifiable {
         }
         if plan.count >= 2 {
             let done = plan.filter(\.isDone).count
-            var eta: TimeInterval?
-            if done >= 1, done < plan.count, let st = planStart {
-                // Only trust it for a plan that began recently (older ones include long idle gaps) and a sane result.
-                let est = lastActivity.timeIntervalSince(st) * Double(plan.count - done) / Double(done)
-                if now.timeIntervalSince(st) < 8 * 3600, est < 12 * 3600 { eta = est }
+            return Progress(fraction: Double(done) / Double(plan.count), eta: nil, detail: "\(done)/\(plan.count)")
+        }
+        // Orchestrator sessions with no step list: subagents finished out of launched since the latest prompt.
+        if let since = promptAt {
+            let batch = subagents.filter { $0.start >= since }
+            let done = batch.filter { !$0.isRunning(at: now) }.count
+            if batch.count >= 2 {
+                return Progress(fraction: Double(done) / Double(batch.count), eta: nil, detail: "agents \(done)/\(batch.count)")
             }
-            return Progress(fraction: Double(done) / Double(plan.count), eta: eta, detail: "\(done)/\(plan.count)")
         }
         if let t = runningTasks.first(where: { $0.progress != nil }), let p = t.progress { return Progress(fraction: p, eta: t.eta, detail: t.progressText) }
         let ps = procs.compactMap(\.progress)
@@ -141,16 +146,26 @@ public struct SessionInfo: Identifiable {
         if !alive { return .finished }
         if needsInput(at: now) { return .waiting }
         if busySince != nil && now.timeIntervalSince(lastActivity) < Tuning.sessionStaleAfter { return .working }
-        if !runningTasks.isEmpty || feeds.contains(where: { $0.isFresh(at: now) }) { return .background }
+        if hasPendingWork(at: now) {
+            // Unfinished work but nothing alive doing it (workers killed, only a waiter left): paused.
+            // Server sessions can't be scanned for processes, so they count as running.
+            return (remote || !procs.isEmpty || runningAgents(at: now) > 0) ? .background : .paused
+        }
         // Turn finished (or silent for a long time, e.g. blocked on a permission prompt): waiting on me.
         let since = busySince != nil ? lastActivity : stateSince
         return now.timeIntervalSince(since) < Tuning.idleAfter ? .waiting : .idle
     }
+    /// A background command is open or a progress feed is being refreshed.
+    public func hasPendingWork(at now: Date) -> Bool {
+        alive && (!runningTasks.isEmpty || feeds.contains(where: { $0.isFresh(at: now) }))
+    }
+
     public func timeInState(at now: Date) -> TimeInterval {
         switch state(at: now) {
         case .working: return now.timeIntervalSince(stateSince)
         case .background:
             return now.timeIntervalSince(([runningTasks.map(\.start).min(), feeds.filter { $0.isFresh(at: now) }.map(\.started).min()].compactMap { $0 }).min() ?? lastActivity)
+        case .paused: return now.timeIntervalSince(busySince != nil ? lastActivity : stateSince)
         case .waiting, .idle: return now.timeIntervalSince(busySince != nil ? lastActivity : stateSince)
         case .finished: return now.timeIntervalSince(lastActivity)
         }

@@ -68,6 +68,18 @@ public struct ReportedProgress: Identifiable {
         return out.sorted { $0.total > $1.total }
     }
 
+    /// Seconds in a sentence like "roughly 10½ hours" or "4½–5 hours" (midpoint of a range); nil if none.
+    public static func estimateSeconds(_ sentence: String) -> TimeInterval? {
+        guard let re = try? NSRegularExpression(pattern: #"(\d+(?:\.\d+)?)(½)?(?:\s*[–-]\s*(\d+(?:\.\d+)?)(½)?)?\s*(hours?|hrs?|minutes?|mins?)\b"#, options: .caseInsensitive),
+              let m = re.firstMatch(in: sentence, range: NSRange(sentence.startIndex..., in: sentence)) else { return nil }
+        func grp(_ i: Int) -> String? { Range(m.range(at: i), in: sentence).map { String(sentence[$0]) } }
+        guard var lo = grp(1).flatMap(Double.init), let unit = grp(5)?.lowercased() else { return nil }
+        if grp(2) != nil { lo += 0.5 }
+        var v = lo
+        if var hi = grp(3).flatMap(Double.init) { if grp(4) != nil { hi += 0.5 }; v = (lo + hi) / 2 }
+        return v * (unit.hasPrefix("h") ? 3600 : 60)
+    }
+
     /// The sentence in which the session itself gives a time estimate ("roughly 10½ hours, so about 5am").
     /// Prefers sentences with a duration over bare clock mentions, strips markdown, and skips "the clock reads …" asides.
     public static func sessionEstimate(_ text: String) -> String? {
@@ -175,6 +187,13 @@ public struct SessionInfo: Identifiable {
         guard let t = statusText, let at = statusAt, now.timeIntervalSince(at) < 3 * 3600 else { return [] }
         return ReportedProgress.parse(t)
     }
+    /// The session's own stated estimate, minus the time since it said it. Used silently as the ETA when nothing is measured.
+    public func statedRemaining(at now: Date) -> TimeInterval? {
+        guard let t = statusText, let at = statusAt, now.timeIntervalSince(at) < 3 * 3600,
+              let sentence = ReportedProgress.sessionEstimate(t), let total = ReportedProgress.estimateSeconds(sentence) else { return nil }
+        let left = total - now.timeIntervalSince(at)
+        return left > 60 ? left : nil
+    }
     public func sessionEstimate(at now: Date) -> String? {
         guard let t = statusText, let at = statusAt, now.timeIntervalSince(at) < 3 * 3600 else { return nil }
         return ReportedProgress.sessionEstimate(t)
@@ -195,7 +214,7 @@ public struct SessionInfo: Identifiable {
             return Progress(fraction: Double(f.doneTotal) / Double(f.grandTotal), eta: f.currentETA, detail: f.currentStage.map { "\($0.name) \($0.done)/\($0.total)" })
         }
         if let r = reported(at: now).first {   // the session's own count beats a coarse step count
-            return Progress(fraction: r.fraction, eta: nil, detail: "\(r.done)/\(r.total)")
+            return Progress(fraction: r.fraction, eta: feeds.isEmpty ? statedRemaining(at: now) : nil, detail: "\(r.done.formatted(.number.grouping(.automatic)))/\(r.total.formatted(.number.grouping(.automatic)))")
         }
         if plan.count >= 2 {
             let done = plan.filter(\.isDone).count

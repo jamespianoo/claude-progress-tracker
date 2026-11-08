@@ -120,6 +120,13 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertTrue(ReportedProgress.parse("saw 2 of 3 agents on 11/08").isEmpty)   // noise ignored
     }
 
+    func testEstimateSeconds() {
+        XCTAssertEqual(ReportedProgress.estimateSeconds("which is roughly 10½ hours, so about 5am"), 10.5 * 3600)
+        XCTAssertEqual(ReportedProgress.estimateSeconds("ETA: about 4½–5 hours for cab"), 4.75 * 3600)
+        XCTAssertEqual(ReportedProgress.estimateSeconds("about 45 minutes left"), 45 * 60)
+        XCTAssertNil(ReportedProgress.estimateSeconds("finishing around 20:40"))
+    }
+
     func testFormat() {
         XCTAssertEqual(formatDuration(4320, compact: true), "1h12m")
         XCTAssertEqual(formatDuration(192), "3m12s")

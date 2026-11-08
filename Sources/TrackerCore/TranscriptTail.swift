@@ -51,6 +51,9 @@ public final class TranscriptTail {
     /// What the session is doing right now, from its latest tool call (cleared when the turn ends).
     public private(set) var activity: String?
     public private(set) var activityAt: Date?
+    /// The session's latest substantial assistant message; progress counts and its own time estimate are read from it.
+    public private(set) var statusText: String?
+    public private(set) var statusAt: Date?
     private var pendingBackground: [String: String] = [:]   // tool_use id -> label
     private var pendingCommands: [String: String] = [:]
 
@@ -73,7 +76,7 @@ public final class TranscriptTail {
         offset = 0; partial = Data(); sawFirstLine = false; dropPartialLine = false
         firstTimestamp = nil; lastTimestamp = nil; busySince = nil; stateSince = nil
         workedClosed = 0; customTitle = nil; agentName = nil; firstPrompt = nil
-        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; backgroundTasks = [:]; pendingBackground = [:]
+        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; statusText = nil; statusAt = nil; backgroundTasks = [:]; pendingBackground = [:]
         plan = []; planStart = nil
     }
 
@@ -213,6 +216,9 @@ public final class TranscriptTail {
 
     private func handleAssistant(_ obj: [String: Any], _ ts: Date) {
         if let blocks = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] {
+            for b in blocks where b["type"] as? String == "text" {
+                if let t = b["text"] as? String, t.count >= 40 { statusText = String(t.prefix(4000)); statusAt = ts }
+            }
             for b in blocks where b["type"] as? String == "tool_use" {
                 if let input = b["input"] as? [String: Any], let name = b["name"] as? String {
                     applyPlanTool(name, input, ts)

@@ -9,7 +9,7 @@ public final class SessionStore {
     private var pathCache: [String: String] = [:]            // sessionId -> transcript path
     private var samples: [String: (t: Date, f: Double)] = [:]   // task id -> first progress sample
     static let remoteWindow: TimeInterval = 2 * 3600
-    private var feedHistory: [String: [(t: Date, done: Int)]] = [:]
+    private var feedHistory: [String: [(t: Date, done: Int, active: Bool)]] = [:]
     private let scanner = ProcessScanner()
     private var known: [String: SessionInfo] = [:]           // sessions seen alive this run (for "finished")
 
@@ -84,7 +84,7 @@ public final class SessionStore {
                 t.advance()
                 guard let start = t.firstTimestamp, let last = t.lastTimestamp else { continue }
                 let id = String(n.dropFirst(6).dropLast(6))
-                var desc = id, type = "agent"
+                var desc = t.firstPrompt ?? id, type = "agent"   // no .meta.json (e.g. SSH sessions): use the agent's first prompt
                 if let d = FileManager.default.contents(atPath: dir + "/agent-\(id).meta.json"),
                    let mj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
                     desc = (mj["description"] as? String) ?? desc
@@ -132,22 +132,26 @@ public final class SessionStore {
         return out
     }
 
-    /// Items/second over the last `window` seconds of samples; nil unless there is at least 3 min of history and progress.
-    static func recentRate(_ samples: [(t: Date, done: Int)], window: TimeInterval = 1800) -> Double? {
-        guard let last = samples.last else { return nil }
-        let inWindow = samples.filter { last.t.timeIntervalSince($0.t) <= window }
-        guard let first = inWindow.first else { return nil }
-        let dt = last.t.timeIntervalSince(first.t), dd = last.done - first.done
-        return (dt >= 180 && dd > 0) ? Double(dd) / dt : nil
+    /// Items/second counted only over intervals where workers were alive at both ends, looking back over at most
+    /// `window` seconds of such active time. nil until there are 10 min of active time and at least 2 items done.
+    static func recentRate(_ samples: [(t: Date, done: Int, active: Bool)], window: TimeInterval = 3600) -> Double? {
+        var activeTime = 0.0, items = 0
+        var i = samples.count - 1
+        while i > 0, activeTime < window {
+            let a = samples[i - 1], b = samples[i]
+            if a.active && b.active { activeTime += b.t.timeIntervalSince(a.t); items += max(0, b.done - a.done) }
+            i -= 1
+        }
+        return (activeTime >= 600 && items >= 2) ? Double(items) / activeTime : nil
     }
 
-    /// Records each new feed update and attaches the measured recent rate.
-    func withRates(_ feeds: [ProgressFeed]) -> [ProgressFeed] {
+    /// Records each new feed update (with whether workers were alive) and attaches the measured rate.
+    func withRates(_ feeds: [ProgressFeed], active: Bool) -> [ProgressFeed] {
         feeds.map { f in
             var f = f
             var h = feedHistory[f.id] ?? []
-            if h.last?.t != f.updated { h.append((f.updated, f.doneTotal)) }
-            h = h.filter { f.updated.timeIntervalSince($0.t) < 7200 }.suffix(1000).map { $0 }
+            if h.last?.t != f.updated { h.append((f.updated, f.doneTotal, active)) }
+            h = h.filter { f.updated.timeIntervalSince($0.t) < 6 * 3600 }.suffix(3000).map { $0 }
             feedHistory[f.id] = h
             f.recentRate = Self.recentRate(h)
             return f
@@ -202,7 +206,7 @@ public final class SessionStore {
     public func refresh() -> [SessionInfo] {
         var result: [String: SessionInfo] = [:]
         var liveIDs = Set<String>()
-        let feeds = withRates(readFeeds())
+        let feeds = readFeeds()
         let hookEvents = readHookEvents()
         for e in registry() where Self.isAlive(e) {
             liveIDs.insert(e.sessionId)
@@ -219,7 +223,7 @@ public final class SessionStore {
                 stateSince: t.stateSince ?? first, workedClosed: t.workedClosed,
                 alive: true, subagents: subagents(for: path))
             info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
-            info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt
+            info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt; info.statusText = t.statusText; info.statusAt = t.statusAt
             info.feeds = feeds.filter { !$0.cwd.isEmpty && $0.cwd == cwd }
             // Only pay for ps/lsof when this session is doing something.
             if info.state(at: Date()) == .working || info.hasPendingWork(at: Date()) {
@@ -237,6 +241,7 @@ public final class SessionStore {
                     return sp
                 }
             }
+            info.feeds = withRates(info.feeds, active: !info.procs.isEmpty)   // rate counts only time workers were alive
             if let h = hookEvents[e.sessionId] { info.hookEvent = h.event; info.hookAt = h.at }
             result[e.sessionId] = info
         }
@@ -260,7 +265,7 @@ public final class SessionStore {
                                        alive: true, subagents: subagents(for: path))
                 info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
                 info.remote = true
-                info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt
+                info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt; info.statusText = t.statusText; info.statusAt = t.statusAt
                 if let h = hookEvents[sid] { info.hookEvent = h.event; info.hookAt = h.at }
                 result[sid] = info; liveIDs.insert(sid)
             }

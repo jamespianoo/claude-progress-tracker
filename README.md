@@ -35,7 +35,7 @@ On first open only the last 24 MB of each transcript is read (some are hundreds 
 - **working**: mid-turn. **running tasks**: background commands, agents or a progress feed with live processes behind them.
 - **paused** (yellow pause icon): unfinished work (open background command or progress feed) but no live process doing it, e.g. workers were killed. Shown with how long it has been paused and its frozen progress.
 - **needs you**: Claude is asking something (needs the hook). Everything else idle is under the "Idle" dropdown.
-- **ETA** (top right, `time left (finish clock)`) appears only when a rate was measured: for progress feeds, the rate over the last ~30 min of observed progress (not since start, which would count paused time). Step-list and agent-count bars show percentage only, because steps are not equal in length. Without 3 min of observed progress there is no ETA rather than a guess.
+- **ETA** (top right, `time left (finish clock)`) is for the **current stage only** and uses a rate measured only over time when workers were actually alive (so pauses never dilute it). Later stages show "queued": their items can cost very different amounts, so extrapolating would be a guess. It needs 10 min of active time and 2 finished items first ("measuring…"), and history is kept only while the app runs. Step-list and agent-count bars show percentage only, because steps are not equal in length.
 
 ## Sub-processes
 Under each active session the app lists what it is running: processes whose working directory is inside the

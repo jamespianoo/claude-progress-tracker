@@ -84,17 +84,17 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertTrue(t.plan.isEmpty)                   // finished plan is cleared by the next prompt
     }
 
-    func testRecentRateIgnoresPausedTime() {
+    func testRateCountsOnlyActiveTime() {
         let t0 = Date(timeIntervalSince1970: 1_000_000)
-        // 600 items in the first 10 min, then paused for 50 min with no progress.
-        var h: [(t: Date, done: Int)] = []
-        for m in 0...60 { h.append((t0.addingTimeInterval(Double(m) * 60), min(m, 10) * 60)) }
-        XCTAssertNil(SessionStore.recentRate(h))                     // stalled in the last 30 min: no ETA
-        // Resumes at 6 items/min for 10 min: the since-start average would be ~0.16/s, the recent rate is ~0.03/s.
-        for m in 61...70 { h.append((t0.addingTimeInterval(Double(m) * 60), 600 + (m - 60) * 6)) }
+        var h: [(t: Date, done: Int, active: Bool)] = []
+        // 20 min running at 1 item/min, then 60 min paused (no progress, not active), then 15 min running at 1 item/min.
+        for m in 0...20 { h.append((t0.addingTimeInterval(Double(m) * 60), m, true)) }
+        for m in 21...80 { h.append((t0.addingTimeInterval(Double(m) * 60), 20, false)) }
+        for m in 81...95 { h.append((t0.addingTimeInterval(Double(m) * 60), 20 + (m - 80), true)) }
         let r = SessionStore.recentRate(h)!
-        XCTAssertGreaterThan(r, 0.03)
-        XCTAssertLessThan(r, 0.04)
+        XCTAssertEqual(r, 1.0 / 60.0, accuracy: 0.002)            // 1 item/min; the pause is not counted
+        XCTAssertNil(SessionStore.recentRate(Array(h.prefix(5))))  // under 10 min of active time: no estimate
+        XCTAssertNil(SessionStore.recentRate(h.map { ($0.t, $0.done, false) }))  // never active: no estimate
     }
 
     func testLargeFileOnlyReadsRecentWindow() {
@@ -107,6 +107,17 @@ final class TranscriptTailTests: XCTestCase {
         append(line("assistant", "11:31:00.000", content: "", stop: "end_turn"))
         t.advance()
         XCTAssertFalse(t.isBusy)                                  // and it keeps tailing normally
+    }
+
+    func testReportedProgressParsing() {
+        let text = "Batches 31-34 are all in. 1,292 of the 3,232 Zone 1 squares are reviewed (40%).\nThe pictures are being taken at about 3 a minute. About 1,930 squares are still to photograph, which is roughly 10½ hours, so about 5am tomorrow."
+        let r = ReportedProgress.parse(text)
+        XCTAssertEqual(r.count, 1)
+        XCTAssertEqual(r[0].done, 1292); XCTAssertEqual(r[0].total, 3232)
+        XCTAssertEqual(r[0].label, "Zone 1 squares")
+        XCTAssertTrue(ReportedProgress.sessionEstimate(text)!.contains("10½ hours"))
+        XCTAssertTrue(ReportedProgress.sessionEstimate("- **ETA:** about 4½–5 hours for cab, so roughly 01:00–01:30 if nothing fails.")!.hasPrefix("ETA: about 4½–5 hours"))
+        XCTAssertTrue(ReportedProgress.parse("saw 2 of 3 agents on 11/08").isEmpty)   // noise ignored
     }
 
     func testFormat() {

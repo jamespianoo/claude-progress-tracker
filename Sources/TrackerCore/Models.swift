@@ -15,17 +15,19 @@ public struct ProgressFeed: Identifiable {
     public func isFresh(at now: Date) -> Bool { now.timeIntervalSince(updated) < 120 }
     public var doneTotal: Int { stages.reduce(0) { $0 + $1.done } }
     public var grandTotal: Int { stages.reduce(0) { $0 + $1.total } }
-    /// Items per second over the last ~30 min of observed progress (set by the store); nil if stalled or not yet measured.
-    /// Deliberately not "since started": that would include paused time and overstate the time left.
+    /// Items per second measured only over time when workers were running (set by the store); nil until enough is
+    /// observed. Deliberately not "since started" or a wall-clock window: both would include paused time.
     public var recentRate: Double?
     public var rate: Double { recentRate ?? 0 }
-    public var overallETA: TimeInterval? { rate > 0 ? Double(grandTotal - doneTotal) / rate : nil }
-    /// Stages are assumed to run in order, so a stage finishes after everything before it plus itself.
-    public func stageETA(_ s: Stage) -> TimeInterval? {
-        guard rate > 0, s.done < s.total, let i = stages.firstIndex(where: { $0.id == s.id }) else { return nil }
-        let remaining = stages[...i].reduce(0) { $0 + ($1.total - $1.done) }
-        return Double(remaining) / rate
+    /// The stage being worked on now: the first one that is not finished.
+    public var currentStage: Stage? { stages.first { $0.done < $0.total } }
+    /// Time left for the current stage only. Later stages are not extrapolated: their items can cost very different
+    /// amounts, so any number would be a guess. Uses the rate measured while workers were actually running.
+    public var currentETA: TimeInterval? {
+        guard rate > 0, let c = currentStage else { return nil }
+        return Double(c.total - c.done) / rate
     }
+    public func stageETA(_ s: Stage) -> TimeInterval? { s.id == currentStage?.id ? currentETA : nil }
 }
 
 public struct PlanStep { public var content: String; public var status: String   // pending | in_progress | completed
@@ -36,6 +38,66 @@ public struct Progress {
     public let eta: TimeInterval?
     /// e.g. "3/7" for plan steps.
     public let detail: String?
+}
+
+public struct ReportedProgress: Identifiable {
+    public let label: String
+    public let done: Int
+    public let total: Int
+    public var id: String { label }
+    public var fraction: Double { total > 0 ? min(1, Double(done) / Double(total)) : 0 }
+
+    /// Reads "1,292 of the 3,232 Zone 1 squares are reviewed" / "40/120 files" style counts from a status message.
+    /// Largest total first; counts with a total under 10 are ignored as noise (dates, "2 of 3 agents").
+    public static func parse(_ text: String) -> [ReportedProgress] {
+        guard let re = try? NSRegularExpression(pattern: #"(\d[\d,]*)\s*(?:/|of(?: the)?)\s*(\d[\d,]*)((?:\s+[A-Za-z0-9][A-Za-z0-9\-]*){0,4})"#) else { return [] }
+        let stop: Set<String> = ["are", "is", "were", "was", "have", "has", "been", "done", "complete", "completed", "reviewed", "so", "and", "but", "in", "at", "on", "for", "to"]
+        var out: [ReportedProgress] = []
+        for m in re.matches(in: text, range: NSRange(text.startIndex..., in: text)) {
+            guard let a = Range(m.range(at: 1), in: text), let b = Range(m.range(at: 2), in: text),
+                  let done = Int(text[a].replacingOccurrences(of: ",", with: "")),
+                  let total = Int(text[b].replacingOccurrences(of: ",", with: "")),
+                  total >= 10, done <= total else { continue }
+            var words: [String] = []
+            if let l = Range(m.range(at: 3), in: text) {
+                for w in text[l].split(separator: " ") { if stop.contains(w.lowercased()) { break }; words.append(String(w)) }
+            }
+            let label = words.isEmpty ? "items" : words.joined(separator: " ")
+            if !out.contains(where: { $0.label == label }) { out.append(ReportedProgress(label: label, done: done, total: total)) }
+        }
+        return out.sorted { $0.total > $1.total }
+    }
+
+    /// The sentence in which the session itself gives a time estimate ("roughly 10½ hours, so about 5am").
+    /// Prefers sentences with a duration over bare clock mentions, strips markdown, and skips "the clock reads …" asides.
+    public static func sessionEstimate(_ text: String) -> String? {
+        let clean = text.replacingOccurrences(of: "**", with: "").replacingOccurrences(of: "`", with: "")
+        let duration = try? NSRegularExpression(pattern: #"\d+(?:½|\.\d+)?(?:\s*[–-]\s*\d+(?:½|\.\d+)?)?\s*(?:hours?|hrs?|minutes?|mins?)\b"#, options: .caseInsensitive)
+        let clock = try? NSRegularExpression(pattern: #"\b\d{1,2}(?::\d\d)?\s?(?:am|pm)\b|\bETA\b"#, options: .caseInsensitive)
+        func has(_ re: NSRegularExpression?, _ s: String) -> Bool { re?.firstMatch(in: s, range: NSRange(s.startIndex..., in: s)) != nil }
+        var best: (Int, String)?
+        var rest = Substring(clean)
+        var sentences: [String] = []
+        for line in clean.split(separator: "\n") {
+            rest = line
+            for part in rest.components(separatedBy: ". ") { sentences.append(part) }
+        }
+        for raw in sentences {
+            var s = raw.trimmingCharacters(in: CharacterSet(charactersIn: " -•*\t"))
+            if s.hasSuffix(".") { s.removeLast() }
+            guard s.count >= 12 else { continue }
+            let lower = s.lowercased()
+            var score = 0
+            if has(duration, s) { score += 3 }
+            if has(clock, s) { score += 1 }
+            if score == 0 { continue }
+            if ["about", "roughly", "around", "eta", "finish", "until", "left", "remaining"].contains(where: { lower.contains($0) }) { score += 2 }
+            if lower.contains("clock reads") || lower.contains("timings i gave") { score -= 4 }
+            if score > (best?.0 ?? 0) { best = (score, s) }
+        }
+        guard let s = best?.1 else { return nil }
+        return s.count > 110 ? String(s.prefix(110)) + "…" : s
+    }
 }
 
 public enum RunState: String {
@@ -105,6 +167,18 @@ public struct SessionInfo: Identifiable {
     public var promptAt: Date?
     public var activity: String?
     public var activityAt: Date?
+    public var statusText: String?
+    public var statusAt: Date?
+
+    /// Counts the session reported in its latest status message (recent only).
+    public func reported(at now: Date) -> [ReportedProgress] {
+        guard let t = statusText, let at = statusAt, now.timeIntervalSince(at) < 3 * 3600 else { return [] }
+        return ReportedProgress.parse(t)
+    }
+    public func sessionEstimate(at now: Date) -> String? {
+        guard let t = statusText, let at = statusAt, now.timeIntervalSince(at) < 3 * 3600 else { return nil }
+        return ReportedProgress.sessionEstimate(t)
+    }
 
     public var currentStep: String? { (plan.first { $0.status == "in_progress" } ?? plan.first { !$0.isDone })?.content }
     /// Latest event from the optional Claude Code hook (see hooks/): Notification = Claude is asking the user.
@@ -118,7 +192,10 @@ public struct SessionInfo: Identifiable {
     /// Best available progress: script feed, then the session's step list, then a task's own output, then worker bars.
     public func progress(at now: Date) -> Progress? {
         if let f = feeds.first(where: { $0.isFresh(at: now) }), f.grandTotal > 0 {
-            return Progress(fraction: Double(f.doneTotal) / Double(f.grandTotal), eta: f.overallETA, detail: nil)
+            return Progress(fraction: Double(f.doneTotal) / Double(f.grandTotal), eta: f.currentETA, detail: f.currentStage.map { "\($0.name) \($0.done)/\($0.total)" })
+        }
+        if let r = reported(at: now).first {   // the session's own count beats a coarse step count
+            return Progress(fraction: r.fraction, eta: nil, detail: "\(r.done)/\(r.total)")
         }
         if plan.count >= 2 {
             let done = plan.filter(\.isDone).count

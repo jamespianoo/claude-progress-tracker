@@ -93,7 +93,10 @@ struct ActiveRow: View {
                                 Text(st.name).frame(width: 64, alignment: .leading)
                                 ProgressView(value: st.fraction).progressViewStyle(.linear)
                                 Text([ "\(st.done)/\(st.total)", "\(Int(st.fraction * 100))%",
-                                       (state == .paused ? nil : f.stageETA(st)).map { "ETA \(now.addingTimeInterval($0).formatted(date: .omitted, time: .shortened))" } ?? (st.done >= st.total ? "done" : nil)]
+                                       st.done >= st.total ? "done" :
+                                       (st.id == f.currentStage?.id
+                                        ? (state == .paused ? "paused" : (f.stageETA(st).map { "ETA \(now.addingTimeInterval($0).formatted(date: .omitted, time: .shortened))" } ?? "measuring…"))
+                                        : "queued")]
                                     .compactMap { $0 }.joined(separator: " · "))
                                     .monospacedDigit().foregroundStyle(Color.primary).fixedSize()
                             }
@@ -130,6 +133,21 @@ struct ActiveRow: View {
                     Spacer(minLength: 4)
                     if let at = session.activityAt { Text(formatDuration(now.timeIntervalSince(at), compact: true)).monospacedDigit() }
                 }
+            }
+            let reported = session.reported(at: now).prefix(3)
+            if !reported.isEmpty {
+                header("Progress (as the session reports)")
+                ForEach(Array(reported)) { r in
+                    HStack(spacing: 8) {
+                        Text(r.label).lineLimit(1).truncationMode(.tail).layoutPriority(1)
+                        Spacer(minLength: 4)
+                        ProgressView(value: r.fraction).progressViewStyle(.linear).frame(width: 90)
+                        Text("\(r.done)/\(r.total) · \(Int(r.fraction * 100))%").monospacedDigit().foregroundStyle(Color.primary).fixedSize()
+                    }
+                }
+            }
+            if let est = session.sessionEstimate(at: now) {
+                Text("Session says: \(est)").lineLimit(2).font(.caption2).padding(.top, 2)
             }
             if session.plan.count >= 2 {
                 let done = session.plan.filter(\.isDone).count
@@ -174,12 +192,14 @@ struct ActiveRow: View {
                 }
             }
             if !agents.isEmpty {
-                header("Agents")
-                ForEach(agents.prefix(5)) { a in
+                header("Agents · \(agents.count) running")
+                // Identical jobs (a swarm of reviewers) collapse into one line with a count and the longest runtime.
+                let groups = Dictionary(grouping: agents, by: { $0.description }).sorted { ($0.value.map { $0.duration(at: now) }.max() ?? 0) > ($1.value.map { $0.duration(at: now) }.max() ?? 0) }
+                ForEach(Array(groups.prefix(4)), id: \.key) { g in
                     HStack {
-                        Text(a.description).lineLimit(1).truncationMode(.tail)
+                        Text(g.value.count > 1 ? "\(g.value.count)× \(g.key)" : g.key).lineLimit(1).truncationMode(.tail)
                         Spacer(minLength: 4)
-                        Text(formatDuration(a.duration(at: now), compact: true)).monospacedDigit().frame(width: 52, alignment: .trailing)
+                        Text(formatDuration(g.value.map { $0.duration(at: now) }.max() ?? 0, compact: true)).monospacedDigit().frame(width: 52, alignment: .trailing)
                     }
                 }
             }

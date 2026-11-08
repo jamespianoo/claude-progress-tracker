@@ -27,7 +27,7 @@ struct ClaudeSessionTrackerApp: App {
             let out = CommandLine.arguments[i + 1]
             Task { @MainActor in
                 let m = TrackerModel()
-                try? await Task.sleep(nanoseconds: 14_000_000_000)
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
                 let host = NSHostingView(rootView: ContentView(model: m).background(Color(white: 0.16)).environment(\.colorScheme, .dark))
                 let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 380, height: 600), styleMask: [.borderless], backing: .buffered, defer: false)
                 win.contentView = host

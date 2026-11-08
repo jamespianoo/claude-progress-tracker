@@ -27,6 +27,10 @@ Nothing is written to `~/.claude` and there is no network code. No hooks needed.
 - Background shell tasks and progress bars are not shown (no source in transcripts).
 - A session that exits is shown as finished until the app restarts (or 1 h), then disappears.
 
+## Popover sections
+Each running session lists only the sections that apply: **Now** (its latest tool call), **Steps** (the unfinished items of its step list), **Workers** (processes, with bars where progress is known), **Background tasks** and **Agents**. Idle sessions are under a collapsible "Idle (n)" row at the bottom (state is remembered).
+On first open only the last 24 MB of each transcript is read (some are hundreds of MB), then new lines are tailed, so start-up is quick and start time is approximate for very long sessions.
+
 ## States and ETA
 - **working**: mid-turn. **running tasks**: background commands, agents or a progress feed with live processes behind them.
 - **paused** (yellow pause icon): unfinished work (open background command or progress feed) but no live process doing it, e.g. workers were killed. Shown with how long it has been paused and its frozen progress.

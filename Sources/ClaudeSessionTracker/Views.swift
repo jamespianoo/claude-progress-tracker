@@ -6,7 +6,7 @@ struct ContentView: View {
     @AppStorage("notifyOnWaiting") private var notifyOnWaiting = true
     @AppStorage("longRunMinutes") private var longRunMinutes = 0
     @State private var showPrefs = false
-    @State private var showIdle = false
+    @AppStorage("showIdle") private var showIdle = false
 
     private var active: [SessionInfo] {
         model.sessions.filter { [.working, .background, .paused, .waiting].contains($0.state(at: model.now)) && ($0.state(at: model.now) != .waiting || $0.needsInput(at: model.now)) }
@@ -24,12 +24,17 @@ struct ContentView: View {
                 }
                 ForEach(active) { ActiveRow(session: $0, now: model.now) }
                 if !idle.isEmpty {
-                    DisclosureGroup(isExpanded: $showIdle) {
-                        VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Button { showIdle.toggle() } label: {
+                            HStack(spacing: 6) {
+                                Image(systemName: showIdle ? "chevron.down" : "chevron.right").font(.caption2.weight(.bold))
+                                Text("Idle (\(idle.count))").font(.callout)
+                                Spacer()
+                            }.foregroundStyle(.secondary).contentShape(Rectangle())
+                        }.buttonStyle(.plain)
+                        if showIdle {
                             ForEach(idle) { IdleRow(session: $0, now: model.now) }
-                        }.padding(.top, 4)
-                    } label: {
-                        Text("Idle (\(idle.count))").font(.callout).foregroundStyle(.secondary)
+                        }
                     }
                 }
             }.padding(12)
@@ -109,29 +114,73 @@ struct ActiveRow: View {
         return formatDuration(session.timeInState(at: now), compact: true)
     }
 
+    private func header(_ t: String) -> some View {
+        Text(t.uppercased()).font(.system(size: 9, weight: .semibold)).tracking(0.6).foregroundStyle(.tertiary).padding(.top, 2)
+    }
+
+    /// Detailed sub-sections: now, steps, workers, tasks, agents. Only sections with content are shown.
     @ViewBuilder private var details: some View {
-        VStack(alignment: .leading, spacing: 3) {
-            if let step = session.currentStep {
-                Text("▸ \(step)").lineLimit(1).truncationMode(.tail)
-            }
-            let shown = Array(session.procs.prefix(5))
-            ForEach(shown) { sp in
-                HStack(spacing: 8) {
-                    Text(sp.label).lineLimit(1).truncationMode(.middle).layoutPriority(1)
+        let running = session.runningTasks
+        let agents = session.subagents.filter { $0.isRunning(at: now) }
+        let workers = Array(session.procs.prefix(6))
+        VStack(alignment: .leading, spacing: 2) {
+            if session.state(at: now) == .working, let act = session.activity {
+                HStack {
+                    Text("Now · \(act)").lineLimit(1).truncationMode(.tail).foregroundStyle(Color.primary.opacity(0.85))
                     Spacer(minLength: 4)
-                    if let f = sp.progress {
-                        ProgressView(value: f).progressViewStyle(.linear).frame(width: 48)
-                        Text("\(Int(f * 100))%").monospacedDigit().frame(width: 36, alignment: .trailing)
-                    }
-                    Text(formatDuration(sp.elapsed, compact: true)).monospacedDigit().frame(width: 44, alignment: .trailing)
+                    if let at = session.activityAt { Text(formatDuration(now.timeIntervalSince(at), compact: true)).monospacedDigit() }
                 }
             }
-            if session.procs.count > shown.count { Text("+\(session.procs.count - shown.count) more") }
-            ForEach(session.subagents.filter { $0.isRunning(at: now) }.prefix(4)) { a in
-                HStack {
-                    Text("agent · \(a.description)").lineLimit(1).truncationMode(.tail)
-                    Spacer(minLength: 4)
-                    Text(formatDuration(a.duration(at: now), compact: true)).monospacedDigit()
+            if session.plan.count >= 2 {
+                let done = session.plan.filter(\.isDone).count
+                header("Steps · \(done) of \(session.plan.count) done")
+                let pending = session.plan.filter { !$0.isDone }
+                ForEach(Array(pending.prefix(6).enumerated()), id: \.offset) { _, step in
+                    HStack(spacing: 5) {
+                        Image(systemName: step.status == "in_progress" ? "play.circle.fill" : "circle").font(.system(size: 9))
+                            .foregroundStyle(step.status == "in_progress" ? Color.green : Color.secondary)
+                        Text(step.content).lineLimit(1).truncationMode(.tail)
+                            .foregroundStyle(step.status == "in_progress" ? Color.primary : Color.secondary)
+                    }
+                }
+                if pending.count > 6 { Text("+\(pending.count - 6) more steps") }
+            } else if let step = session.currentStep {
+                Text("▸ \(step)").lineLimit(1)
+            }
+            if !workers.isEmpty {
+                header("Workers")
+                ForEach(workers) { sp in
+                    HStack(spacing: 8) {
+                        Text(sp.label).lineLimit(1).truncationMode(.middle).layoutPriority(1)
+                        Spacer(minLength: 4)
+                        if let f = sp.progress {
+                            ProgressView(value: f).progressViewStyle(.linear).frame(width: 48)
+                            Text("\(Int(f * 100))%").monospacedDigit().frame(width: 36, alignment: .trailing)
+                        }
+                        Text(formatDuration(sp.elapsed, compact: true)).monospacedDigit().frame(width: 52, alignment: .trailing)
+                    }
+                }
+                if session.procs.count > workers.count { Text("+\(session.procs.count - workers.count) more") }
+            }
+            if !running.isEmpty {
+                header("Background tasks")
+                ForEach(running.prefix(4)) { t in
+                    HStack {
+                        Text(t.label).lineLimit(1).truncationMode(.tail)
+                        Spacer(minLength: 4)
+                        if let p = t.progressText { Text(p).monospacedDigit() }
+                        Text(formatDuration(t.elapsed(at: now), compact: true)).monospacedDigit().frame(width: 52, alignment: .trailing)
+                    }
+                }
+            }
+            if !agents.isEmpty {
+                header("Agents")
+                ForEach(agents.prefix(5)) { a in
+                    HStack {
+                        Text(a.description).lineLimit(1).truncationMode(.tail)
+                        Spacer(minLength: 4)
+                        Text(formatDuration(a.duration(at: now), compact: true)).monospacedDigit().frame(width: 52, alignment: .trailing)
+                    }
                 }
             }
         }.font(.caption).foregroundStyle(.secondary).padding(.leading, 14)

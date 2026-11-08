@@ -97,6 +97,18 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertLessThan(r, 0.04)
     }
 
+    func testLargeFileOnlyReadsRecentWindow() {
+        for i in 0..<200 { append(line("user", "10:00:\(String(format: "%02d", i % 60)).000", content: "\"old prompt \(i)\"")) }
+        append(line("assistant", "11:00:00.000", content: "", stop: "end_turn"))
+        append(line("user", "11:30:00.000", content: "\"recent\""))
+        let t = TranscriptTail(path: path, initialWindow: 400); t.advance()
+        XCTAssertTrue(t.isBusy)                                   // state from the tail
+        XCTAssertNotEqual(t.firstPrompt, "old prompt 0")          // early history was skipped
+        append(line("assistant", "11:31:00.000", content: "", stop: "end_turn"))
+        t.advance()
+        XCTAssertFalse(t.isBusy)                                  // and it keeps tailing normally
+    }
+
     func testFormat() {
         XCTAssertEqual(formatDuration(4320, compact: true), "1h12m")
         XCTAssertEqual(formatDuration(192), "3m12s")

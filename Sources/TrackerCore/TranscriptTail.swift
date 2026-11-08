@@ -48,10 +48,18 @@ public final class TranscriptTail {
     public private(set) var planStart: Date?
     /// Time of the latest real (non-injected) user prompt.
     public private(set) var promptAt: Date?
+    /// What the session is doing right now, from its latest tool call (cleared when the turn ends).
+    public private(set) var activity: String?
+    public private(set) var activityAt: Date?
     private var pendingBackground: [String: String] = [:]   // tool_use id -> label
     private var pendingCommands: [String: String] = [:]
 
-    public init(path: String) { self.path = path }
+    /// On first open only the last `initialWindow` bytes are read (transcripts can be hundreds of MB). Start time
+    /// and total worked time are then approximate; state, plan, tasks and activity come from the recent window.
+    private let initialWindow: UInt64
+    private var dropPartialLine = false
+
+    public init(path: String, initialWindow: UInt64 = 24 << 20) { self.path = path; self.initialWindow = initialWindow }
 
     /// Worked time as of `now`. A stale open interval is capped at last activity.
     public func worked(at now: Date, staleAfter: TimeInterval) -> TimeInterval {
@@ -62,10 +70,10 @@ public final class TranscriptTail {
     }
 
     private func reset() {
-        offset = 0; partial = Data(); sawFirstLine = false
+        offset = 0; partial = Data(); sawFirstLine = false; dropPartialLine = false
         firstTimestamp = nil; lastTimestamp = nil; busySince = nil; stateSince = nil
         workedClosed = 0; customTitle = nil; agentName = nil; firstPrompt = nil
-        cwd = nil; gitBranch = nil; backgroundTasks = [:]; pendingBackground = [:]
+        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; backgroundTasks = [:]; pendingBackground = [:]
         plan = []; planStart = nil
     }
 
@@ -76,6 +84,10 @@ public final class TranscriptTail {
         missing = false
         if UInt64(st.st_ino) != fileID || UInt64(st.st_size) < offset {
             reset(); fileID = UInt64(st.st_ino)
+        }
+        if offset == 0, UInt64(st.st_size) > initialWindow {
+            offset = UInt64(st.st_size) - initialWindow
+            dropPartialLine = true
         }
         guard UInt64(st.st_size) > offset, let fh = FileHandle(forReadingAtPath: path) else { return }
         defer { try? fh.close() }
@@ -88,6 +100,13 @@ public final class TranscriptTail {
     }
 
     private func consume(_ chunk: Data) {
+        var chunk = chunk
+        if dropPartialLine {
+            // We started mid-line: discard up to and including the first newline.
+            guard let nl = chunk.firstIndex(of: 0x0A) else { return }
+            chunk = chunk.subdata(in: chunk.index(after: nl)..<chunk.endIndex)
+            dropPartialLine = false
+        }
         var buf = partial
         buf.append(chunk)
         var lines: [Range<Int>] = []
@@ -195,7 +214,12 @@ public final class TranscriptTail {
     private func handleAssistant(_ obj: [String: Any], _ ts: Date) {
         if let blocks = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] {
             for b in blocks where b["type"] as? String == "tool_use" {
-                if let input = b["input"] as? [String: Any], let name = b["name"] as? String { applyPlanTool(name, input, ts) }
+                if let input = b["input"] as? [String: Any], let name = b["name"] as? String {
+                    applyPlanTool(name, input, ts)
+                    if !name.contains("update_plan"), !name.contains("wrap_up"), name != "TodoWrite" {
+                        activity = Self.describe(name, input); activityAt = ts
+                    }
+                }
             }
             for b in blocks where b["type"] as? String == "tool_use" && b["name"] as? String == "Bash" {
                 guard let input = b["input"] as? [String: Any], input["run_in_background"] as? Bool == true,
@@ -235,7 +259,23 @@ public final class TranscriptTail {
     private func goBusy(_ ts: Date) {
         if busySince == nil { busySince = ts; stateSince = ts }
     }
+    static func describe(_ name: String, _ input: [String: Any]) -> String {
+        func base(_ k: String) -> String? { (input[k] as? String).map { ($0 as NSString).lastPathComponent } }
+        func clip(_ s: String) -> String { let t = s.split(separator: "\n").first.map(String.init) ?? s; return t.count > 60 ? String(t.prefix(60)) + "…" : t }
+        let short = name.hasPrefix("mcp__") ? (name.split(separator: "_").last.map(String.init) ?? name) : name
+        switch name {
+        case "Bash": return "Bash · " + clip((input["description"] as? String) ?? (input["command"] as? String) ?? "")
+        case "Read", "Edit", "Write", "NotebookEdit": return "\(name) · " + (base("file_path") ?? "")
+        case "Agent", "Task": return "Agent · " + clip((input["description"] as? String) ?? "")
+        case "Grep", "Glob": return "\(name) · " + clip((input["pattern"] as? String) ?? "")
+        case "WebSearch": return "Search · " + clip((input["query"] as? String) ?? "")
+        case "WebFetch": return "Fetch · " + clip((input["url"] as? String) ?? "")
+        default: return short
+        }
+    }
+
     private func goIdle(_ ts: Date) {
+        activity = nil; activityAt = nil
         if let b = busySince { workedClosed += max(0, ts.timeIntervalSince(b)) }
         if busySince != nil || stateSince == nil { stateSince = ts }
         busySince = nil

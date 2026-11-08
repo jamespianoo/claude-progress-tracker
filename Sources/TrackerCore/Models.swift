@@ -103,6 +103,8 @@ public struct SessionInfo: Identifiable {
     public var plan: [PlanStep] = []
     public var planStart: Date?
     public var promptAt: Date?
+    public var activity: String?
+    public var activityAt: Date?
 
     public var currentStep: String? { (plan.first { $0.status == "in_progress" } ?? plan.first { !$0.isDone })?.content }
     /// Latest event from the optional Claude Code hook (see hooks/): Notification = Claude is asking the user.

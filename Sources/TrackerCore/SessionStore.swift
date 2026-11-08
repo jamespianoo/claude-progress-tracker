@@ -219,7 +219,7 @@ public final class SessionStore {
                 stateSince: t.stateSince ?? first, workedClosed: t.workedClosed,
                 alive: true, subagents: subagents(for: path))
             info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
-            info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt
+            info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt
             info.feeds = feeds.filter { !$0.cwd.isEmpty && $0.cwd == cwd }
             // Only pay for ps/lsof when this session is doing something.
             if info.state(at: Date()) == .working || info.hasPendingWork(at: Date()) {
@@ -260,7 +260,7 @@ public final class SessionStore {
                                        alive: true, subagents: subagents(for: path))
                 info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
                 info.remote = true
-                info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt
+                info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt
                 if let h = hookEvents[sid] { info.hookEvent = h.event; info.hookAt = h.at }
                 result[sid] = info; liveIDs.insert(sid)
             }

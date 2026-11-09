@@ -59,6 +59,8 @@ public final class TranscriptTail {
     /// The latest message that states a time estimate. Kept even when later messages have none.
     public private(set) var estimateText: String?
     public private(set) var estimateAt: Date?
+    /// Counts reported in successive status messages, by label, for pace ETAs.
+    public private(set) var reportedHistory: [String: [ReportedSample]] = [:]
     /// Agent/Task launches by tool_use id -> the description given when launching (names agents like "Roads fix round 4").
     public private(set) var agentDescriptions: [String: String] = [:]
     /// Ids (task or agent) the harness reported as finished via task-notification.
@@ -89,7 +91,7 @@ public final class TranscriptTail {
         offset = 0; partial = Data(); sawFirstLine = false; dropPartialLine = false
         firstTimestamp = nil; lastTimestamp = nil; busySince = nil; stateSince = nil
         workedClosed = 0; customTitle = nil; agentName = nil; firstPrompt = nil
-        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; statusText = nil; statusAt = nil; estimateText = nil; estimateAt = nil; agentDescriptions = [:]; finishedIDs = []; waitingIDs = [:]; agentNames = [:]; backgroundTasks = [:]; pendingBackground = [:]
+        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; statusText = nil; statusAt = nil; estimateText = nil; estimateAt = nil; reportedHistory = [:]; agentDescriptions = [:]; finishedIDs = []; waitingIDs = [:]; agentNames = [:]; backgroundTasks = [:]; pendingBackground = [:]
         plan = []; planStart = nil; planMarks = []
     }
 
@@ -245,6 +247,14 @@ public final class TranscriptTail {
                 if let t = b["text"] as? String, t.count >= 40 {
                     statusText = String(t.prefix(4000)); statusAt = ts
                     if StatedEstimate.mayContainEstimate(t) { estimateText = String(t.prefix(4000)); estimateAt = ts }
+                    // Keyed by the total: the same count is often worded differently from message to message.
+                    for r in ReportedProgress.parse(String(t.prefix(4000))) {
+                        let key = String(r.total)
+                        var h = reportedHistory[key] ?? []
+                        if let l = h.last, r.done < l.done { h = [] }              // went backwards: a different count
+                        if h.last?.t != ts { h.append(ReportedSample(t: ts, done: r.done, total: r.total)) }
+                        reportedHistory[key] = Array(h.suffix(40))
+                    }
                 }
             }
             for b in blocks where b["type"] as? String == "tool_use" {

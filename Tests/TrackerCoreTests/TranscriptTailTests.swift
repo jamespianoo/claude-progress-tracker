@@ -258,6 +258,25 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertEqual(s.progress(at: now)!.fraction, 0, accuracy: 0.001)   // no estimate: falls back to the step count
     }
 
+    func testReportedCountPaceEstimate() {
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        var s = SessionInfo(id: "s", pid: 0, cwd: "/x", branch: nil, title: "t", start: t0.addingTimeInterval(-9000),
+                            lastActivity: t0.addingTimeInterval(3600), busySince: nil, stateSince: t0.addingTimeInterval(3600),
+                            workedClosed: 0, alive: true, subagents: [])
+        s.remote = true
+        s.statusText = "9 of 11 pages done so far"; s.statusAt = t0.addingTimeInterval(3600)
+        s.reportedHistory = ["11": [ReportedSample(t: t0.addingTimeInterval(-20 * 3600), done: 1, total: 11),   // a day-old reading across a long idle gap
+                                     ReportedSample(t: t0, done: 3, total: 11),
+                                       ReportedSample(t: t0.addingTimeInterval(1800), done: 6, total: 11),
+                                       ReportedSample(t: t0.addingTimeInterval(3600), done: 9, total: 11)]]
+        // 6 pages per hour; 2 left -> 20 min after the last message; asked 5 min later -> 15 min.
+        let e = s.eta(at: t0.addingTimeInterval(3900))!
+        XCTAssertTrue(e.approximate)
+        XCTAssertEqual(e.seconds, 15 * 60, accuracy: 1)
+        s.reportedHistory = ["11": [ReportedSample(t: t0, done: 9, total: 11), ReportedSample(t: t0.addingTimeInterval(3600), done: 9, total: 11)]]
+        XCTAssertNil(s.eta(at: t0.addingTimeInterval(3900)))            // no progress between readings: no estimate
+    }
+
     func testFormat() {
         XCTAssertEqual(formatDuration(4320, compact: true), "1h12m")
         XCTAssertEqual(formatDuration(192), "3m12s")

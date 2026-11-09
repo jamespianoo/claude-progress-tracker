@@ -112,6 +112,9 @@ public struct ReportedProgress: Identifiable {
     }
 }
 
+/// One reading of a count a session reported in a status message ("9 of 11 pages done").
+public struct ReportedSample { public let t: Date; public let done: Int; public let total: Int }
+
 public struct ETA {
     public let seconds: TimeInterval
     /// True for a step-pace guess (shown with "~"); false for a stated or measured estimate.
@@ -206,6 +209,7 @@ public struct SessionInfo: Identifiable {
     public var statusText: String?
     public var statusAt: Date?
     public var estimateText: String?
+    public var reportedHistory: [String: [ReportedSample]] = [:]
     public var estimateAt: Date?
 
     /// Counts the session reported in its latest status message (recent only).
@@ -224,8 +228,24 @@ public struct SessionInfo: Identifiable {
     public func eta(at now: Date) -> ETA? {
         if let s = statedRemaining(at: now) { return ETA(seconds: s, approximate: false) }
         if let m = progress(at: now)?.eta { return ETA(seconds: m, approximate: false) }
+        if let r = reportedPaceRemaining(at: now) { return ETA(seconds: r, approximate: true) }
         if let p = planPaceRemaining(at: now) { return ETA(seconds: p, approximate: true) }
         return nil
+    }
+
+    /// Pace of the count the session keeps reporting: items per second between its messages, applied to what is left.
+    /// Needs two readings at least 5 min apart with progress between them, in the last 6 hours.
+    func reportedPaceRemaining(at now: Date) -> TimeInterval? {
+        guard alive, let main = reported(at: now).first, let all = reportedHistory[String(main.total)] else { return nil }
+        let pts = all.filter { now.timeIntervalSince($0.t) < 6 * 3600 }
+        guard var firstIdx = pts.indices.last, let last = pts.last, last.done < last.total else { return nil }
+        // Walk back through readings while gaps stay under 3 h: longer gaps mostly contain idle time, not work.
+        while firstIdx > 0, pts[firstIdx].t.timeIntervalSince(pts[firstIdx - 1].t) <= 3 * 3600 { firstIdx -= 1 }
+        let first = pts[firstIdx]
+        let dt = last.t.timeIntervalSince(first.t), dd = last.done - first.done
+        guard dt >= 300, dd > 0 else { return nil }
+        let left = Double(last.total - last.done) / (Double(dd) / dt) - now.timeIntervalSince(last.t)
+        return (left > 60 && left < 24 * 3600) ? left : nil
     }
 
     /// Steps left x the average time the finished steps took. Only for sessions doing the steps themselves: with workers

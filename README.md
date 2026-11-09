@@ -42,7 +42,8 @@ Progress file, then counts the session reports ("N of M"), then **time** (elapse
   1. **What the session itself says.** The latest message that states an estimate is read ("about 5 to 6 hours from now", "ETA about 4½–5 hours", "finishing around 20:40", "roughly 01:00–01:30") and counted down from when it was said. Explicit "from now/left/remaining/in N hours" statements win over looser "about N hours", then the latest finish is taken, since an overall completion is later than its milestones. Clock times are only used for local sessions (a server's time zone is unknown). Quoted text and `>` quotes are ignored, estimates already in the past are dropped, and the estimate is kept even if later messages have none.
   2. **A measured rate** for progress feeds, counted only over time workers were alive, for the current stage only (later stages show "queued").
   3. **A step-pace guess, shown with `~`**, for sessions doing their own steps: how long the completed steps of the current plan took, applied to the steps left. Only when a completion was seen recently (last 3 h), the plan was not replaced, and no workers or background tasks are running (then the remaining step is usually the long one). Rough by nature, hence the `~`.
-  4. Otherwise **"no ETA"**. Bars from step lists and agent counts are percentages only.
+  4. **The pace of a count the session reports** ("4 of 11", then "9 of 11" in a later message): items per second between its messages, applied to what is left, shown with `~`. Needs two readings 5+ minutes apart with gaps under 3 h (longer gaps are mostly idle time).
+  5. Otherwise **"no ETA"**. Bars from step lists and agent counts are percentages only.
 
 ## Sub-processes
 Under each active session the app lists what it is running: processes whose working directory is inside the
@@ -79,3 +80,8 @@ Paste this into Claude Code to have it wire up the same thing (for example on an
 > `~/.claude-progress/<name>.json` in the format described in the README ("Progress bars and ETA"), with `cwd` set to
 > this session's working directory, then tell me to restart the script. Do not write anything inside `~/.claude`
 > other than the hook entries in `settings.json`, and do not send any data off this machine.
+
+## Getting an ETA out of every session
+A session only gets an ETA if it says something the tracker can read. Sessions that just do short interactive tasks, or never state timings, will show "no ETA" whichever server they run on. To make any session report in a readable way, add this to its instructions (e.g. a `CLAUDE.md`), or paste it at the start of a long job:
+
+> For any task that will take more than a few minutes, keep me posted in your status messages with (1) a count such as "9 of 40 pages done" and (2) a finish estimate in plain words such as "about 2 hours from now" or "finishing around 21:30". Update both whenever they change. Keep the same wording for the count each time.

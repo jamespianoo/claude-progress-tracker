@@ -235,7 +235,7 @@ public final class SessionStore {
                 stateSince: t.stateSince ?? first, workedClosed: t.workedClosed,
                 alive: true, subagents: subagents(for: path, descriptions: t.agentDescriptions, launchNames: t.agentNames, finished: t.finishedIDs, waiting: t.waitingIDs))
             info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
-            info.plan = t.plan; info.planStart = t.planStart; info.planMarks = t.planMarks; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt; info.statusText = t.statusText; info.statusAt = t.statusAt; info.estimateText = t.estimateText; info.estimateAt = t.estimateAt
+            info.plan = t.plan; info.planStart = t.planStart; info.planMarks = t.planMarks; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt; info.statusText = t.statusText; info.statusAt = t.statusAt; info.estimateText = t.estimateText; info.reportedHistory = t.reportedHistory; info.estimateAt = t.estimateAt
             info.feeds = feeds.filter { !$0.cwd.isEmpty && $0.cwd == cwd }
             // Only pay for ps/lsof when this session is doing something.
             if info.state(at: Date()) == .working || info.hasPendingWork(at: Date()) {
@@ -277,7 +277,7 @@ public final class SessionStore {
                                        alive: true, subagents: subagents(for: path, descriptions: t.agentDescriptions, launchNames: t.agentNames, finished: t.finishedIDs, waiting: t.waitingIDs))
                 info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
                 info.remote = true
-                info.plan = t.plan; info.planStart = t.planStart; info.planMarks = t.planMarks; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt; info.statusText = t.statusText; info.statusAt = t.statusAt; info.estimateText = t.estimateText; info.estimateAt = t.estimateAt
+                info.plan = t.plan; info.planStart = t.planStart; info.planMarks = t.planMarks; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt; info.statusText = t.statusText; info.statusAt = t.statusAt; info.estimateText = t.estimateText; info.reportedHistory = t.reportedHistory; info.estimateAt = t.estimateAt
                 if let h = hookEvents[sid] { info.hookEvent = h.event; info.hookAt = h.at }
                 result[sid] = info; liveIDs.insert(sid)
             }

@@ -75,7 +75,6 @@ struct ContentView: View {
             }.padding(.horizontal, 12).padding(.vertical, 8)
         }
         .frame(width: Grid.width)
-        .background(WindowTopAnchor())
         .onAppear { model.popoverVisible = true; model.requestNotificationAuth() }
         .onDisappear { model.popoverVisible = false }
     }
@@ -137,9 +136,10 @@ struct ActiveRow: View {
                 Text(session.title).font(.system(size: 14, weight: .medium)).lineLimit(1)
                 if session.remote { Image(systemName: "server.rack").font(.caption2).foregroundStyle(.secondary) }
                 Spacer(minLength: 8)
-                Text(state == .waiting ? "needs you" : topRight(state))
+                let right = state == .waiting ? "needs you" : topRight(state)
+                Text(right)
                     .font(.callout.monospacedDigit())
-                    .foregroundStyle(state == .waiting ? Color.orange : (state == .paused ? Color.yellow : Color.primary))
+                    .foregroundStyle(state == .waiting ? Color.orange : (state == .paused ? Color.yellow : (right == "no ETA" ? Color.secondary : Color.primary)))
             }
             VStack(alignment: .leading, spacing: 3) {
                 Text(session.project).font(.caption).foregroundStyle(.secondary)
@@ -160,7 +160,7 @@ struct ActiveRow: View {
     private func topRight(_ state: RunState) -> String {
         if state == .paused { return "paused \(formatDuration(session.timeInState(at: now), compact: true))" }
         if let eta = session.progress(at: now)?.eta { return "\(formatDuration(eta, compact: true)) (\(clock(eta, from: now)))" }
-        return formatDuration(session.timeInState(at: now), compact: true)
+        return "no ETA"   // never show elapsed time here: it reads as time left
     }
 
     @ViewBuilder private func body(_ state: RunState) -> some View {
@@ -269,42 +269,5 @@ struct IdleRow: View {
             Spacer(minLength: 8)
             Text(formatDuration(session.timeInState(at: now), compact: true)).monospacedDigit()
         }.font(.caption).foregroundStyle(.secondary)
-    }
-}
-
-/// Keeps the menu-bar popover pinned just under the menu bar. AppKit resizes a window from its bottom-left corner, so
-/// when the content shrinks while the popover is open (a job finishes) the top edge would otherwise drop and the
-/// popover "hangs" below the bar. Re-pinned on every SwiftUI refresh (each second while open), on resize/show, and
-/// shortly after appearing, because relying on resize notifications alone proved unreliable.
-struct WindowTopAnchor: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSView { AnchorView() }
-    func updateNSView(_ view: NSView, context: Context) {
-        DispatchQueue.main.async { [weak view] in AnchorView.pin(view?.window) }
-    }
-
-    final class AnchorView: NSView {
-        private var observers: [NSObjectProtocol] = []
-        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            observers.forEach(NotificationCenter.default.removeObserver); observers = []
-            guard let w = window else { return }
-            let nc = NotificationCenter.default
-            for name in [NSWindow.didResizeNotification, NSWindow.didBecomeKeyNotification, NSWindow.didChangeScreenNotification,
-                         NSWindow.didUpdateNotification] {
-                observers.append(nc.addObserver(forName: name, object: w, queue: .main) { [weak w] _ in Self.pin(w) })
-            }
-            for delay in [0.0, 0.05, 0.3] {
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak w] in Self.pin(w) }
-            }
-        }
-
-        /// Top edge goes 2 pt under the menu bar (visibleFrame ends at the bottom of the menu bar / notch area).
-        static func pin(_ w: NSWindow?) {
-            guard let w, w.isVisible, let screen = w.screen ?? NSScreen.main else { return }
-            let top = screen.visibleFrame.maxY - 2
-            if abs(w.frame.maxY - top) > 0.5 { w.setFrameTopLeftPoint(NSPoint(x: w.frame.minX, y: top)) }
-        }
     }
 }

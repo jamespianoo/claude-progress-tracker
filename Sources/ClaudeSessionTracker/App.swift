@@ -1,28 +1,13 @@
 import SwiftUI
+import Combine
 import TrackerCore
 
 @main
 struct ClaudeSessionTrackerApp: App {
-    @StateObject private var model: TrackerModel
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     init() {
         // `ClaudeSessionTracker --dump` prints the current picture and exits (for verification).
-        // `--selftest-pin`: a window left hanging low must be pulled back under the menu bar.
-        if CommandLine.arguments.contains("--selftest-pin") {
-            _ = NSApplication.shared
-            let screen = NSScreen.main!
-            let w = NSWindow(contentRect: NSRect(x: 200, y: 100, width: 380, height: 300), styleMask: [.borderless], backing: .buffered, defer: false)
-            w.orderFrontRegardless()
-            let expected = screen.visibleFrame.maxY - 2
-            print("before maxY \(w.frame.maxY) expected \(expected)")
-            WindowTopAnchor.AnchorView.pin(w)
-            print("after  maxY \(w.frame.maxY)  \(abs(w.frame.maxY - expected) < 1 ? "PASS" : "FAIL")")
-            w.setContentSize(NSSize(width: 380, height: 150))   // shrink: the bottom-left origin stays, top drops
-            print("shrunk maxY \(w.frame.maxY)")
-            WindowTopAnchor.AnchorView.pin(w)
-            print("repin  maxY \(w.frame.maxY)  \(abs(w.frame.maxY - expected) < 1 ? "PASS" : "FAIL")")
-            exit(0)
-        }
         // `--probe file.jsonl` prints how one transcript is parsed (debugging).
         if let i = CommandLine.arguments.firstIndex(of: "--probe"), i + 1 < CommandLine.arguments.count {
             let t = TranscriptTail(path: CommandLine.arguments[i + 1]); t.advance()
@@ -68,15 +53,52 @@ struct ClaudeSessionTrackerApp: App {
                 exit(0)
             }
         }
-        _model = StateObject(wrappedValue: TrackerModel())
     }
 
-    var body: some Scene {
-        MenuBarExtra {
-            ContentView(model: model)
-        } label: {
-            HStack(spacing: 4) { Image(nsImage: Logo.menuBar); Text(model.title).monospacedDigit() }
+    // The UI is a native NSStatusItem + NSPopover (see AppDelegate): AppKit keeps a popover anchored under the
+    // menu bar when its content changes size, which SwiftUI's MenuBarExtra window does not.
+    var body: some Scene { Settings { EmptyView() } }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
+    private var statusItem: NSStatusItem!
+    private let popover = NSPopover()
+    private var model: TrackerModel!
+    private var titleSink: AnyCancellable?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
+        model = TrackerModel()
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        if let b = statusItem.button {
+            b.image = Logo.menuBar
+            b.imagePosition = .imageLeft
+            b.target = self
+            b.action = #selector(toggle)
         }
-        .menuBarExtraStyle(.window)
+        setTitle(model.title)
+        titleSink = model.$title.sink { [weak self] in self?.setTitle($0) }
+
+        let host = NSHostingController(rootView: ContentView(model: model))
+        host.sizingOptions = [.preferredContentSize]      // popover follows the content's size
+        popover.contentViewController = host
+        popover.behavior = .transient
+        popover.delegate = self
     }
+
+    private func setTitle(_ t: String) {
+        statusItem.button?.attributedTitle = NSAttributedString(
+            string: " " + t, attributes: [.font: NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .regular)])
+    }
+
+    @objc private func toggle() {
+        guard let b = statusItem.button else { return }
+        if popover.isShown { popover.performClose(nil); return }
+        model.popoverVisible = true
+        popover.show(relativeTo: b.bounds, of: b, preferredEdge: .minY)
+        popover.contentViewController?.view.window?.makeKey()
+    }
+
+    func popoverDidClose(_ notification: Notification) { model.popoverVisible = false }
 }

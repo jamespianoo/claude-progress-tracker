@@ -273,11 +273,14 @@ struct IdleRow: View {
 }
 
 /// Keeps the menu-bar popover pinned just under the menu bar. AppKit resizes a window from its bottom-left corner, so
-/// when the content shrinks while the popover is open (a session finishes) the top edge would otherwise drop and the
-/// popover "hangs" below the bar. After every resize or show, put the top edge back under the menu bar.
+/// when the content shrinks while the popover is open (a job finishes) the top edge would otherwise drop and the
+/// popover "hangs" below the bar. Re-pinned on every SwiftUI refresh (each second while open), on resize/show, and
+/// shortly after appearing, because relying on resize notifications alone proved unreliable.
 struct WindowTopAnchor: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView { AnchorView() }
-    func updateNSView(_ view: NSView, context: Context) {}
+    func updateNSView(_ view: NSView, context: Context) {
+        DispatchQueue.main.async { [weak view] in AnchorView.pin(view?.window) }
+    }
 
     final class AnchorView: NSView {
         private var observers: [NSObjectProtocol] = []
@@ -286,17 +289,21 @@ struct WindowTopAnchor: NSViewRepresentable {
         override func viewDidMoveToWindow() {
             super.viewDidMoveToWindow()
             observers.forEach(NotificationCenter.default.removeObserver); observers = []
-            guard let w = window, w.level != .normal else { return }   // only the status-bar popover, not ordinary windows
+            guard let w = window else { return }
             let nc = NotificationCenter.default
-            for name in [NSWindow.didResizeNotification, NSWindow.didBecomeKeyNotification, NSWindow.didChangeScreenNotification] {
+            for name in [NSWindow.didResizeNotification, NSWindow.didBecomeKeyNotification, NSWindow.didChangeScreenNotification,
+                         NSWindow.didUpdateNotification] {
                 observers.append(nc.addObserver(forName: name, object: w, queue: .main) { [weak w] _ in Self.pin(w) })
             }
-            DispatchQueue.main.async { [weak w] in Self.pin(w) }
+            for delay in [0.0, 0.05, 0.3] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak w] in Self.pin(w) }
+            }
         }
 
+        /// Top edge goes 2 pt under the menu bar (visibleFrame ends at the bottom of the menu bar / notch area).
         static func pin(_ w: NSWindow?) {
-            guard let w, let screen = w.screen ?? NSScreen.main else { return }
-            let top = screen.visibleFrame.maxY - 2          // visibleFrame ends at the bottom of the menu bar
+            guard let w, w.isVisible, let screen = w.screen ?? NSScreen.main else { return }
+            let top = screen.visibleFrame.maxY - 2
             if abs(w.frame.maxY - top) > 0.5 { w.setFrameTopLeftPoint(NSPoint(x: w.frame.minX, y: top)) }
         }
     }

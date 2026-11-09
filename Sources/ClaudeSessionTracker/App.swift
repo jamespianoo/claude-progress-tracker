@@ -7,6 +7,22 @@ struct ClaudeSessionTrackerApp: App {
 
     init() {
         // `ClaudeSessionTracker --dump` prints the current picture and exits (for verification).
+        // `--selftest-pin`: a window left hanging low must be pulled back under the menu bar.
+        if CommandLine.arguments.contains("--selftest-pin") {
+            _ = NSApplication.shared
+            let screen = NSScreen.main!
+            let w = NSWindow(contentRect: NSRect(x: 200, y: 100, width: 380, height: 300), styleMask: [.borderless], backing: .buffered, defer: false)
+            w.orderFrontRegardless()
+            let expected = screen.visibleFrame.maxY - 2
+            print("before maxY \(w.frame.maxY) expected \(expected)")
+            WindowTopAnchor.AnchorView.pin(w)
+            print("after  maxY \(w.frame.maxY)  \(abs(w.frame.maxY - expected) < 1 ? "PASS" : "FAIL")")
+            w.setContentSize(NSSize(width: 380, height: 150))   // shrink: the bottom-left origin stays, top drops
+            print("shrunk maxY \(w.frame.maxY)")
+            WindowTopAnchor.AnchorView.pin(w)
+            print("repin  maxY \(w.frame.maxY)  \(abs(w.frame.maxY - expected) < 1 ? "PASS" : "FAIL")")
+            exit(0)
+        }
         // `--probe file.jsonl` prints how one transcript is parsed (debugging).
         if let i = CommandLine.arguments.firstIndex(of: "--probe"), i + 1 < CommandLine.arguments.count {
             let t = TranscriptTail(path: CommandLine.arguments[i + 1]); t.advance()

@@ -264,6 +264,13 @@ public struct SessionInfo: Identifiable {
         if let r = reported(at: now).first {   // the session's own count beats a coarse step count
             return Progress(fraction: r.fraction, eta: nil, detail: "\(r.done.formatted(.number.grouping(.automatic)))/\(r.total.formatted(.number.grouping(.automatic)))")
         }
+        // The session stated how long it will take: show elapsed / (elapsed + time left). Better than a step count when
+        // the first step is one long job (a server session whose agent's progress is invisible).
+        if let rem = statedRemaining(at: now), let said = estimateAt {
+            let start = min(planStart ?? said, said)
+            let elapsed = max(0, now.timeIntervalSince(start))
+            return Progress(fraction: min(0.98, max(0.01, elapsed / (elapsed + rem))), eta: nil, detail: "time")
+        }
         if plan.count >= 2 {
             let done = plan.filter(\.isDone).count
             return Progress(fraction: Double(done) / Double(plan.count), eta: nil, detail: "\(done)/\(plan.count)")

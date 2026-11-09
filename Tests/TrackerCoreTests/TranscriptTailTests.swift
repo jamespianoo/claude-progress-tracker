@@ -203,6 +203,9 @@ final class TranscriptTailTests: XCTestCase {
         let text = "Londonish says \"That puts the re-check at about 5 to 6 hours from now\" in its last message.\n> about 3 hours from now"
         XCTAssertNil(StatedEstimate.finish(in: text, statusAt: said, remote: true))
         XCTAssertNotNil(StatedEstimate.finish(in: "I expect about 3 hours from now.", statusAt: said, remote: true))
+        // Describing another session's estimate is not an estimate.
+        XCTAssertNil(StatedEstimate.finish(in: "The session estimates the fix agent at about 2 to 3 hours from now.", statusAt: said, remote: true))
+        XCTAssertNil(StatedEstimate.finish(in: "Londonish said it should be done in about 5 hours.", statusAt: said, remote: true))
     }
 
     func testPlanPaceEstimate() {
@@ -236,6 +239,23 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertEqual(e.seconds, 25 * 60, accuracy: 1)
         s.procs = [SubProcess(id: 1, label: "worker", elapsed: 60, progress: nil, progressText: nil)]
         XCTAssertNil(s.eta(at: now))                              // workers running: step pace is not meaningful
+    }
+
+    func testTimeBasedBarWhenEstimateStated() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        var s = SessionInfo(id: "s", pid: 0, cwd: "/x", branch: nil, title: "t", start: now.addingTimeInterval(-7200),
+                            lastActivity: now.addingTimeInterval(-30), busySince: nil, stateSince: now.addingTimeInterval(-30),
+                            workedClosed: 0, alive: true, subagents: [])
+        s.remote = true
+        s.plan = (0..<5).map { PlanStep(content: "step \($0)", status: $0 == 0 ? "in_progress" : "pending") }   // 0 of 5 done
+        s.planStart = now.addingTimeInterval(-3600)
+        s.estimateText = "My estimate: about 3 hours from now."
+        s.estimateAt = now.addingTimeInterval(-3600)                    // said an hour ago: 2 h left, 1 h elapsed
+        let p = s.progress(at: now)!
+        XCTAssertEqual(p.fraction, 1.0 / 3.0, accuracy: 0.01)           // not 0 / 5
+        XCTAssertEqual(p.detail, "time")
+        s.estimateText = nil
+        XCTAssertEqual(s.progress(at: now)!.fraction, 0, accuracy: 0.001)   // no estimate: falls back to the step count
     }
 
     func testFormat() {

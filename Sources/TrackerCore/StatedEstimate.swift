@@ -11,7 +11,9 @@ import Foundation
 public enum StatedEstimate {
     private static let dur = #"(\d+(?:\.\d+)?)(½)?(?:\s*(?:–|-|to)\s*(\d+(?:\.\d+)?)(½)?)?\s*(hours?|hrs?|minutes?|mins?)\b"#
     private static let negatives = ["after it", "after the", "overlap", " per ", "each ", "on its own", "takes ", "took ", " ago",
-                                    "started", "since ", "clock reads", "so far", "elapsed", "running for", "has been", "in total", "under an hour", "less than"]
+                                    "started", "since ", "clock reads", "so far", "elapsed", "running for", "has been", "in total", "under an hour", "less than",
+                                    // reporting on someone else's estimate rather than giving one
+                                    "the session", "session's", "sessions", "it estimates", "estimated at", "estimates at", "stated", "says ", "said "]
 
     private static func re(_ p: String) -> NSRegularExpression { try! NSRegularExpression(pattern: p, options: .caseInsensitive) }
     private static let explicitFromNow = re(dur + #"\s+(?:from now|left|remaining|to go|more)\b"#)

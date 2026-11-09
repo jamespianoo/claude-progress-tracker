@@ -31,6 +31,9 @@ Nothing is written to `~/.claude` and there is no network code. No hooks needed.
 Each running session lists only the sections that apply: **Now** (its latest tool call), **Steps** (the unfinished items of its step list), **Workers** (processes, with bars where progress is known), **Background tasks** and **Agents**. Idle sessions are under a collapsible "Idle (n)" row at the bottom (state is remembered).
 On first open only the last 24 MB of each transcript is read (some are hundreds of MB), then new lines are tailed, so start-up is quick and start time is approximate for very long sessions.
 
+## Bar source priority
+Progress file, then counts the session reports ("N of M"), then **time** (elapsed out of elapsed + the time left the session itself stated, labelled `time`), then the step list, then agent counts, task output and worker bars. The time bar exists because some sessions have one long first step (e.g. an agent on a server) that leaves a step count at 0 for hours.
+
 ## States and ETA
 - **working**: mid-turn. **running tasks**: background commands, agents or a progress feed with live processes behind them.
 - **paused** (yellow pause icon): unfinished work (open background command or progress feed) but no live process doing it, e.g. workers were killed. Shown with how long it has been paused and its frozen progress.

@@ -141,13 +141,30 @@ public struct SubagentInfo: Identifiable {
     public let lastActivity: Date
     public let busy: Bool
     public let workedClosed: TimeInterval
+    /// Background commands this agent started that have not reported finished (it is alive while it waits on them).
+    public var tasks: [BackgroundTask] = []
+    /// The parent session was told this agent finished.
+    public var finished = false
+    /// The parent was told this agent is waiting on its own background work (alive, though its file is silent).
+    public var waitingSince: Date?
+    /// When the agent's file was last written (an agent waiting on tasks resumes work then).
+    public var fileModified: Date?
 
-    /// Running while mid-turn and recently active.
+    public var runningTasks: [BackgroundTask] { tasks.filter { $0.status == .running && Date().timeIntervalSince($0.start) < 24 * 3600 } }
+
+    /// Running while mid-turn and recently active, or while waiting on its own background tasks (silent for hours).
     public func isRunning(at now: Date) -> Bool {
-        busy && now.timeIntervalSince(lastActivity) < Tuning.subagentStaleAfter
+        if finished { return false }
+        if busy && now.timeIntervalSince(lastActivity) < Tuning.subagentStaleAfter { return true }
+        if !runningTasks.isEmpty { return true }
+        if let w = waitingSince, now.timeIntervalSince(w) < 24 * 3600 { return true }
+        return false
     }
     public func duration(at now: Date) -> TimeInterval {
-        (isRunning(at: now) ? now : lastActivity).timeIntervalSince(start)
+        guard isRunning(at: now) else { return lastActivity.timeIntervalSince(start) }
+        // Mid-turn: since it started. Waiting on its tasks: since its file was last written (when it last resumed).
+        if busy && now.timeIntervalSince(lastActivity) < Tuning.subagentStaleAfter { return now.timeIntervalSince(start) }
+        return now.timeIntervalSince(fileModified ?? start)
     }
     public func statusLabel(at now: Date) -> String {
         if isRunning(at: now) { return "running" }

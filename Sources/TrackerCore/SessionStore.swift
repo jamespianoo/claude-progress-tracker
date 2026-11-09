@@ -69,29 +69,41 @@ public final class SessionStore {
 
     /// Subagent transcripts: `<session>/subagents/` locally, or beside the transcript for desktop-app SSH sessions.
     /// Only files touched in the last 12 h are read (an SSH folder can hold hundreds of old ones).
-    func subagents(for transcript: String) -> [SubagentInfo] {
+    func subagents(for transcript: String, descriptions: [String: String] = [:], launchNames: [String: String] = [:], finished: Set<String> = [], waiting: [String: Date] = [:]) -> [SubagentInfo] {
         let parent = (transcript as NSString).deletingLastPathComponent
         var dirs = [(transcript as NSString).deletingPathExtension + "/subagents"]
         if (parent as NSString).lastPathComponent.hasPrefix("ssh-") { dirs.append(parent) }
         let cutoff = Date().addingTimeInterval(-12 * 3600)
+        let waitingCutoff = Date().addingTimeInterval(-72 * 3600)   // an unfinished agent can be silent for a long time
         var out: [SubagentInfo] = []
+        var fileMod: Date?
         for dir in dirs {
             guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir) else { continue }
             for n in names where n.hasPrefix("agent-") && n.hasSuffix(".jsonl") {
                 let path = dir + "/" + n
-                guard let m = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date, m > cutoff else { continue }
+                let aid = String(n.dropFirst(6).dropLast(6))
+                guard let m = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date,
+                      m > cutoff || (m > waitingCutoff && !finished.contains(aid)) else { continue }
+                fileMod = m
                 let t = tail(path)
                 t.advance()
                 guard let start = t.firstTimestamp, let last = t.lastTimestamp else { continue }
                 let id = String(n.dropFirst(6).dropLast(6))
-                var desc = t.firstPrompt ?? id, type = "agent"   // no .meta.json (e.g. SSH sessions): use the agent's first prompt
+                var desc = launchNames[id] ?? t.firstPrompt ?? id, type = "agent"   // launch name, else the agent's first prompt
                 if let d = FileManager.default.contents(atPath: dir + "/agent-\(id).meta.json"),
                    let mj = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] {
-                    desc = (mj["description"] as? String) ?? desc
+                    // Name given at launch: in the meta file, else from the parent's Agent tool call (matched by tool_use id).
+                    if let md = mj["description"] as? String { desc = md }
+                    else if let tu = mj["toolUseId"] as? String, let ld = descriptions[tu] { desc = ld }
                     type = (mj["agentType"] as? String) ?? type
                 }
-                out.append(SubagentInfo(id: id, description: desc, agentType: type, start: start,
-                                        lastActivity: last, busy: t.isBusy, workedClosed: t.workedClosed))
+                var info = SubagentInfo(id: id, description: desc, agentType: type, start: start,
+                                        lastActivity: last, busy: t.isBusy, workedClosed: t.workedClosed)
+                info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.map { $0 }
+                info.finished = finished.contains(id)
+                info.waitingSince = waiting[id]
+                info.fileModified = fileMod
+                out.append(info)
             }
         }
         return out.sorted { $0.start > $1.start }
@@ -221,7 +233,7 @@ public final class SessionStore {
                 id: e.sessionId, pid: e.pid, cwd: cwd, branch: t.gitBranch, title: title,
                 start: first, lastActivity: last, busySince: t.busySince,
                 stateSince: t.stateSince ?? first, workedClosed: t.workedClosed,
-                alive: true, subagents: subagents(for: path))
+                alive: true, subagents: subagents(for: path, descriptions: t.agentDescriptions, launchNames: t.agentNames, finished: t.finishedIDs, waiting: t.waitingIDs))
             info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
             info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt; info.statusText = t.statusText; info.statusAt = t.statusAt
             info.feeds = feeds.filter { !$0.cwd.isEmpty && $0.cwd == cwd }
@@ -262,7 +274,7 @@ public final class SessionStore {
                 var info = SessionInfo(id: sid, pid: 0, cwd: cwd, branch: t.gitBranch, title: title, start: first,
                                        lastActivity: t.lastTimestamp ?? first, busySince: t.busySince,
                                        stateSince: t.stateSince ?? first, workedClosed: t.workedClosed,
-                                       alive: true, subagents: subagents(for: path))
+                                       alive: true, subagents: subagents(for: path, descriptions: t.agentDescriptions, launchNames: t.agentNames, finished: t.finishedIDs, waiting: t.waitingIDs))
                 info.tasks = t.backgroundTasks.values.sorted { $0.start > $1.start }.prefix(8).map(withProgress)
                 info.remote = true
                 info.plan = t.plan; info.planStart = t.planStart; info.promptAt = t.promptAt; info.activity = t.activity; info.activityAt = t.activityAt; info.statusText = t.statusText; info.statusAt = t.statusAt

@@ -229,12 +229,16 @@ struct ActiveRow: View {
             }
             if !agents.isEmpty {
                 Header(text: "Agents · \(agents.count) running")
-                let groups = Dictionary(grouping: agents, by: { $0.description })
-                    .sorted { ($0.value.map { $0.duration(at: now) }.max() ?? 0) > ($1.value.map { $0.duration(at: now) }.max() ?? 0) }
-                ForEach(Array(groups.prefix(4)), id: \.key) { g in
-                    ListRow(left: g.value.count > 1 ? "\(g.value.count)× \(g.key)" : g.key,
-                            right: formatDuration(g.value.map { $0.duration(at: now) }.max() ?? 0, compact: true))
+                ForEach(Array(agents.sorted { $0.start < $1.start }.prefix(6))) { a in
+                    ListRow(icon: "person.crop.circle", iconColor: .green, left: a.description, leftColor: Color.primary.opacity(0.9),
+                            right: formatDuration(a.duration(at: now), compact: true))
+                    ForEach(Array(a.runningTasks.prefix(3))) { t in
+                        ListRow(icon: "terminal", left: t.label, right: formatDuration(t.elapsed(at: now), compact: true))
+                            .padding(.leading, 14)
+                    }
+                    if a.runningTasks.count > 3 { ListRow(left: "+\(a.runningTasks.count - 3) more tasks").padding(.leading, 14) }
                 }
+                if agents.count > 6 { ListRow(left: "+\(agents.count - 6) more agents") }
             }
         }.font(.caption).foregroundStyle(.secondary)
     }

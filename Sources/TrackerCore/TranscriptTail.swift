@@ -54,6 +54,14 @@ public final class TranscriptTail {
     /// The session's latest substantial assistant message; progress counts and its own time estimate are read from it.
     public private(set) var statusText: String?
     public private(set) var statusAt: Date?
+    /// Agent/Task launches by tool_use id -> the description given when launching (names agents like "Roads fix round 4").
+    public private(set) var agentDescriptions: [String: String] = [:]
+    /// Ids (task or agent) the harness reported as finished via task-notification.
+    public private(set) var finishedIDs: Set<String> = []
+    /// Agents the parent was told are "waiting on their own background work" (alive, not finished), with the notice time.
+    public private(set) var waitingIDs: [String: Date] = [:]
+    /// agentId -> launch description, from the launch result (works when the agent has no .meta.json).
+    public private(set) var agentNames: [String: String] = [:]
     private var pendingBackground: [String: String] = [:]   // tool_use id -> label
     private var pendingCommands: [String: String] = [:]
 
@@ -76,7 +84,7 @@ public final class TranscriptTail {
         offset = 0; partial = Data(); sawFirstLine = false; dropPartialLine = false
         firstTimestamp = nil; lastTimestamp = nil; busySince = nil; stateSince = nil
         workedClosed = 0; customTitle = nil; agentName = nil; firstPrompt = nil
-        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; statusText = nil; statusAt = nil; backgroundTasks = [:]; pendingBackground = [:]
+        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; statusText = nil; statusAt = nil; agentDescriptions = [:]; finishedIDs = []; waitingIDs = [:]; agentNames = [:]; backgroundTasks = [:]; pendingBackground = [:]
         plan = []; planStart = nil
     }
 
@@ -163,6 +171,9 @@ public final class TranscriptTail {
             if type == "assistant" { handleAssistant(obj, ts) }
         case "queue-operation":
             if obj["operation"] as? String == "enqueue", let c = obj["content"] as? String { handleNotification(c, ts) }
+        case "attachment":
+            // Agents (and sessions) also receive task-notifications as queued-command attachments.
+            if let att = obj["attachment"] as? [String: Any], let c = att["prompt"] as? String { handleNotification(c, ts) }
         default: break
         }
     }
@@ -173,8 +184,11 @@ public final class TranscriptTail {
     }
 
     private func handleNotification(_ c: String, _ ts: Date?) {
-        guard c.contains("<task-notification>"), let id = Self.match("<task-id>([^<]+)</task-id>", in: c)?.first,
-              var t = backgroundTasks[id] else { return }
+        guard c.contains("<task-notification>"), let id = Self.match("<task-id>([^<]+)</task-id>", in: c)?.first else { return }
+        // "…is waiting on its own background work" means an agent paused for its tasks, not that it finished.
+        let waiting = c.contains("waiting on its own background work") || c.contains("stopped with background work of its own still running")
+        if waiting { finishedIDs.remove(id); if let ts { waitingIDs[id] = ts } } else { finishedIDs.insert(id); waitingIDs[id] = nil }
+        guard var t = backgroundTasks[id] else { return }
         let status = Self.match("<status>([^<]+)</status>", in: c)?.first ?? "completed"
         t.status = status == "completed" ? .completed : .failed
         t.end = ts
@@ -182,6 +196,9 @@ public final class TranscriptTail {
     }
 
     private func handleUser(_ obj: [String: Any], _ ts: Date) {
+        if let tur = obj["toolUseResult"] as? [String: Any], let aid = tur["agentId"] as? String, let d = tur["description"] as? String {
+            agentNames[aid] = d
+        }
         if obj["isMeta"] as? Bool == true { return }
         let content = (obj["message"] as? [String: Any])?["content"]
         var text: String?
@@ -194,7 +211,10 @@ public final class TranscriptTail {
                 let body: String
                 if let str = b["content"] as? String { body = str }
                 else { body = ((b["content"] as? [[String: Any]]) ?? []).compactMap { $0["text"] as? String }.joined(separator: "\n") }
-                if let m = Self.match("ID: (\\w+)\\. Output is being written to: (\\S+?)\\.? ", in: body + " ") ?? Self.match("ID: (\\w+)\\.? ?Output is being written to: (\\S+)", in: body) {
+                // Only when the result BEGINS with the harness wording (output that merely quotes it must not count):
+                // "Command running in background with ID: X. Output is being written to: P." or
+                // "Command was moved to the background (ID: X). Output is being written to: P."
+                if let m = Self.match("^\\s*Command (?:running in background with|was moved to the background \\()\\s*ID: (\\w+)\\)?\\.?\\s*Output is being written to: (\\S+)", in: body) {
                     let out = m[1].hasSuffix(".") ? String(m[1].dropLast()) : m[1]
                     backgroundTasks[m[0]] = BackgroundTask(id: m[0], label: label, command: pendingCommands[tid] ?? "", start: ts, end: nil, status: .running, outputPath: out)
                 }
@@ -221,6 +241,8 @@ public final class TranscriptTail {
             }
             for b in blocks where b["type"] as? String == "tool_use" {
                 if let input = b["input"] as? [String: Any], let name = b["name"] as? String {
+                    if name == "Agent" || name == "Task", let id = b["id"] as? String,
+                       let d = (input["description"] as? String) ?? (input["name"] as? String) { agentDescriptions[id] = d }
                     applyPlanTool(name, input, ts)
                     if !name.contains("update_plan"), !name.contains("wrap_up"), name != "TodoWrite" {
                         activity = Self.describe(name, input); activityAt = ts
@@ -228,8 +250,9 @@ public final class TranscriptTail {
                 }
             }
             for b in blocks where b["type"] as? String == "tool_use" && b["name"] as? String == "Bash" {
-                guard let input = b["input"] as? [String: Any], input["run_in_background"] as? Bool == true,
-                      let tid = b["id"] as? String else { continue }
+                // Every Bash call is remembered until its result arrives: long foreground commands are also moved to the
+                // background by the harness ("Command was moved to the background (ID: …)").
+                guard let input = b["input"] as? [String: Any], let tid = b["id"] as? String else { continue }
                 let label = (input["description"] as? String) ?? (input["command"] as? String).map { String($0.prefix(60)) } ?? "background command"
                 pendingBackground[tid] = label
                 pendingCommands[tid] = input["command"] as? String ?? ""

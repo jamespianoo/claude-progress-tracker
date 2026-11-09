@@ -142,6 +142,32 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertNotEqual(session(agentRunning: false).state(at: now), .background)
     }
 
+    func testBackgroundTaskLifecycleFromAttachments() {
+        let launch = #"{"type":"assistant","timestamp":"2026-01-01T10:00:00.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu1","name":"Bash","input":{"command":"sleep 99","description":"Wait for portal","run_in_background":true}}]}}"# + "\n"
+        let result = #"{"type":"user","timestamp":"2026-01-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu1","content":"Command running in background with ID: bt1. Output is being written to: /tmp/x/bt1.output. You will be notified"}]}}"# + "\n"
+        append(launch); append(result)
+        // A command the harness moved to the background on its own (no run_in_background flag).
+        append(#"{"type":"assistant","timestamp":"2026-01-01T10:00:05.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu2","name":"Bash","input":{"command":"until grep -q DONE x; do sleep 5; done","description":"Wait for portal check"}}]}}"# + "\n")
+        append(#"{"type":"user","timestamp":"2026-01-01T10:02:05.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu2","content":"Command was moved to the background (ID: bt2). Output is being written to: /tmp/x/bt2.output. You will be notified when it completes."}]}}"# + "\n")
+        // A command whose OUTPUT merely quotes the harness wording is not a background task.
+        append(#"{"type":"assistant","timestamp":"2026-01-01T10:03:00.000Z","message":{"role":"assistant","stop_reason":"tool_use","content":[{"type":"tool_use","id":"tu3","name":"Bash","input":{"command":"grep background transcript","description":"Search transcript"}}]}}"# + "\n")
+        append(#"{"type":"user","timestamp":"2026-01-01T10:03:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu3","content":"found: Command running in background with ID: bt9. Output is being written to: /tmp/y/bt9.output"}]}}"# + "\n")
+        let t = TranscriptTail(path: path); t.advance()
+        XCTAssertEqual(t.backgroundTasks["bt1"]?.status, .running)
+        XCTAssertEqual(t.backgroundTasks["bt2"]?.status, .running)
+        XCTAssertNil(t.backgroundTasks["bt9"])
+        XCTAssertEqual(t.backgroundTasks["bt2"]?.label, "Wait for portal check")
+        XCTAssertEqual(t.backgroundTasks["bt2"]?.outputPath, "/tmp/x/bt2.output")
+        append(#"{"type":"attachment","timestamp":"2026-01-01T10:30:00.000Z","attachment":{"type":"queued_command","prompt":"<task-notification>\n<task-id>bt1</task-id>\n<status>completed</status>\n</task-notification>"}}"# + "\n")
+        // An agent paused for its own background work is not finished.
+        append(#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-01-01T10:31:00.000Z","content":"<task-notification><task-id>agentA</task-id><status>completed</status><summary>Agent x is waiting on its own background work</summary></task-notification>"}"# + "\n")
+        append(#"{"type":"queue-operation","operation":"enqueue","timestamp":"2026-01-01T10:32:00.000Z","content":"<task-notification><task-id>agentB</task-id><status>completed</status><summary>Agent y finished</summary></task-notification>"}"# + "\n")
+        t.advance()
+        XCTAssertEqual(t.backgroundTasks["bt1"]?.status, .completed)
+        XCTAssertFalse(t.finishedIDs.contains("agentA"))
+        XCTAssertTrue(t.finishedIDs.contains("agentB"))
+    }
+
     func testFormat() {
         XCTAssertEqual(formatDuration(4320, compact: true), "1h12m")
         XCTAssertEqual(formatDuration(192), "3m12s")

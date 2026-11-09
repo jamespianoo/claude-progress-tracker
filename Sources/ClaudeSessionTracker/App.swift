@@ -22,8 +22,8 @@ struct ClaudeSessionTrackerApp: App {
                 print("\(s.state(at: now).rawValue)\t\(s.title)\t\(s.project)\t\(s.remote ? "remote:" : "")\(s.progress(at: now).map { "[\(Int($0.fraction*100))% \($0.detail ?? "")] " } ?? "")\(s.branch ?? "-")\tstart \(s.start.formatted())\tinState \(formatDuration(s.timeInState(at: now)))\ttotal \(formatDuration(s.total(at: now)))\tworked \(formatDuration(s.worked(at: now)))")
                 for t in s.runningTasks { print("   task\t\(t.label)\t\(formatDuration(t.elapsed(at: now)))\t\(t.progressText ?? "-")\toutput \(t.outputPath)") }
                 for sp in s.procs { print("   proc\t\(sp.label)\t\(formatDuration(sp.elapsed))\t\(sp.progressText ?? "-")") }
-                for a in s.subagents.prefix(5) {
-                    print("   sub\t\(a.description)\t\(a.statusLabel(at: now))\t\(formatDuration(a.duration(at: now)))")
+                for a in s.subagents.filter({ $0.isRunning(at: now) || !$0.runningTasks.isEmpty }).prefix(12) {
+                    print("   sub\t\(a.description)\t\(a.statusLabel(at: now))\t\(formatDuration(a.duration(at: now)))\ttasks \(a.runningTasks.count)/\(a.tasks.count)\tfinished \(a.finished)")
                 }
             }
             print(String(format: "scan %.2fs", Date().timeIntervalSince(t0)))

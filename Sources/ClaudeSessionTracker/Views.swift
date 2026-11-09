@@ -159,7 +159,7 @@ struct ActiveRow: View {
     /// Time left with the clock time it finishes, e.g. "45m (22:00)"; paused time, or elapsed when there is no estimate.
     private func topRight(_ state: RunState) -> String {
         if state == .paused { return "paused \(formatDuration(session.timeInState(at: now), compact: true))" }
-        if let eta = session.progress(at: now)?.eta { return "\(formatDuration(eta, compact: true)) (\(clock(eta, from: now)))" }
+        if let e = session.eta(at: now) { return "\(e.approximate ? "~" : "")\(formatDuration(e.seconds, compact: true)) (\(clock(e.seconds, from: now)))" }
         return "no ETA"   // never show elapsed time here: it reads as time left
     }
 

@@ -11,7 +11,7 @@ struct ClaudeSessionTrackerApp: App {
         // `--probe file.jsonl` prints how one transcript is parsed (debugging).
         if let i = CommandLine.arguments.firstIndex(of: "--probe"), i + 1 < CommandLine.arguments.count {
             let t = TranscriptTail(path: CommandLine.arguments[i + 1]); t.advance()
-            print("first \(String(describing: t.firstTimestamp))\nlast \(String(describing: t.lastTimestamp))\nbusySince \(String(describing: t.busySince))\nstateSince \(String(describing: t.stateSince))\nactivity \(t.activity ?? "-")\nplan \(t.plan.count)")
+            print("first \(String(describing: t.firstTimestamp))\nlast \(String(describing: t.lastTimestamp))\nbusySince \(String(describing: t.busySince))\nstateSince \(String(describing: t.stateSince))\nactivity \(t.activity ?? "-")\nplan \(t.plan.count)\nstatusAt \(String(describing: t.statusAt))\nSTATUS: \(t.statusText ?? "-")\nreported \(ReportedProgress.parse(t.statusText ?? "").map { "\($0.label) \($0.done)/\($0.total)" })\nestimate \(ReportedProgress.sessionEstimate(t.statusText ?? "") ?? "nil")\nseconds \(String(describing: ReportedProgress.estimateSeconds(ReportedProgress.sessionEstimate(t.statusText ?? "") ?? "")))")
             exit(0)
         }
         if CommandLine.arguments.contains("--dump") {
@@ -19,8 +19,9 @@ struct ClaudeSessionTrackerApp: App {
             let rows = SessionStore().refresh()
             let now = Date()
             for s in rows {
-                print("\(s.state(at: now).rawValue)\t\(s.title)\t\(s.project)\t\(s.remote ? "remote:" : "")\(s.progress(at: now).map { "[\(Int($0.fraction*100))% \($0.detail ?? "")] " } ?? "")\(s.branch ?? "-")\tstart \(s.start.formatted())\tinState \(formatDuration(s.timeInState(at: now)))\ttotal \(formatDuration(s.total(at: now)))\tworked \(formatDuration(s.worked(at: now)))")
+                print("\(s.state(at: now).rawValue)\t\(s.title)\t[ETA \(s.eta(at: now).map { ($0.approximate ? "~" : "") + formatDuration($0.seconds, compact: true) } ?? "none")]\t\(s.project)\t\(s.remote ? "remote:" : "")\(s.progress(at: now).map { "[\(Int($0.fraction*100))% \($0.detail ?? "")] " } ?? "")\(s.branch ?? "-")\tstart \(s.start.formatted())\tinState \(formatDuration(s.timeInState(at: now)))\ttotal \(formatDuration(s.total(at: now)))\tworked \(formatDuration(s.worked(at: now)))")
                 for t in s.runningTasks { print("   task\t\(t.label)\t\(formatDuration(t.elapsed(at: now)))\t\(t.progressText ?? "-")\toutput \(t.outputPath)") }
+                if !s.plan.isEmpty { print("   plan\t\(s.plan.filter(\.isDone).count)/\(s.plan.count) marks \(s.planMarks.count) start \(s.planStart.map { $0.formatted() } ?? "-")") }
                 for sp in s.procs { print("   proc\t\(sp.label)\t\(formatDuration(sp.elapsed))\t\(sp.progressText ?? "-")") }
                 for a in s.subagents.filter({ $0.isRunning(at: now) || !$0.runningTasks.isEmpty }).prefix(12) {
                     print("   sub\t\(a.description)\t\(a.statusLabel(at: now))\t\(formatDuration(a.duration(at: now)))\ttasks \(a.runningTasks.count)/\(a.tasks.count)\tfinished \(a.finished)")

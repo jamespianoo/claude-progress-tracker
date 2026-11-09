@@ -35,7 +35,11 @@ On first open only the last 24 MB of each transcript is read (some are hundreds 
 - **working**: mid-turn. **running tasks**: background commands, agents or a progress feed with live processes behind them.
 - **paused** (yellow pause icon): unfinished work (open background command or progress feed) but no live process doing it, e.g. workers were killed. Shown with how long it has been paused and its frozen progress.
 - **needs you**: Claude is asking something (needs the hook). Everything else idle is under the "Idle" dropdown.
-- **ETA** (top right, `time left (finish clock)`) is for the **current stage only** and uses a rate measured only over time when workers were actually alive (so pauses never dilute it). Later stages show "queued": their items can cost very different amounts, so extrapolating would be a guess. It needs 10 min of active time and 2 finished items first ("measuring…"), and history is kept only while the app runs. Step-list and agent-count bars show percentage only, because steps are not equal in length.
+- **ETA** (top right, `time left (finish clock)`) works the same for every session, in this order:
+  1. **What the session itself says.** The latest message that states an estimate is read ("about 5 to 6 hours from now", "ETA about 4½–5 hours", "finishing around 20:40", "roughly 01:00–01:30") and counted down from when it was said. Explicit "from now/left/remaining/in N hours" statements win over looser "about N hours", then the latest finish is taken, since an overall completion is later than its milestones. Clock times are only used for local sessions (a server's time zone is unknown). Quoted text and `>` quotes are ignored, estimates already in the past are dropped, and the estimate is kept even if later messages have none.
+  2. **A measured rate** for progress feeds, counted only over time workers were alive, for the current stage only (later stages show "queued").
+  3. **A step-pace guess, shown with `~`**, for sessions doing their own steps: how long the completed steps of the current plan took, applied to the steps left. Only when a completion was seen recently (last 3 h), the plan was not replaced, and no workers or background tasks are running (then the remaining step is usually the long one). Rough by nature, hence the `~`.
+  4. Otherwise **"no ETA"**. Bars from step lists and agent counts are percentages only.
 
 ## Sub-processes
 Under each active session the app lists what it is running: processes whose working directory is inside the

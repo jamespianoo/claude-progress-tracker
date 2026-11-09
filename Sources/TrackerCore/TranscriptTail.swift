@@ -46,6 +46,8 @@ public final class TranscriptTail {
     /// The session's own step list since the latest user prompt (desktop `update_plan` or `TodoWrite`).
     public private(set) var plan: [PlanStep] = []
     public private(set) var planStart: Date?
+    /// When each step of the current plan was seen to complete (transitions only), for step-pace ETAs.
+    public private(set) var planMarks: [Date] = []
     /// Time of the latest real (non-injected) user prompt.
     public private(set) var promptAt: Date?
     /// What the session is doing right now, from its latest tool call (cleared when the turn ends).
@@ -54,6 +56,9 @@ public final class TranscriptTail {
     /// The session's latest substantial assistant message; progress counts and its own time estimate are read from it.
     public private(set) var statusText: String?
     public private(set) var statusAt: Date?
+    /// The latest message that states a time estimate. Kept even when later messages have none.
+    public private(set) var estimateText: String?
+    public private(set) var estimateAt: Date?
     /// Agent/Task launches by tool_use id -> the description given when launching (names agents like "Roads fix round 4").
     public private(set) var agentDescriptions: [String: String] = [:]
     /// Ids (task or agent) the harness reported as finished via task-notification.
@@ -84,8 +89,8 @@ public final class TranscriptTail {
         offset = 0; partial = Data(); sawFirstLine = false; dropPartialLine = false
         firstTimestamp = nil; lastTimestamp = nil; busySince = nil; stateSince = nil
         workedClosed = 0; customTitle = nil; agentName = nil; firstPrompt = nil
-        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; statusText = nil; statusAt = nil; agentDescriptions = [:]; finishedIDs = []; waitingIDs = [:]; agentNames = [:]; backgroundTasks = [:]; pendingBackground = [:]
-        plan = []; planStart = nil
+        cwd = nil; gitBranch = nil; activity = nil; activityAt = nil; statusText = nil; statusAt = nil; estimateText = nil; estimateAt = nil; agentDescriptions = [:]; finishedIDs = []; waitingIDs = [:]; agentNames = [:]; backgroundTasks = [:]; pendingBackground = [:]
+        plan = []; planStart = nil; planMarks = []
     }
 
     /// Reads any bytes appended since the last call.
@@ -227,7 +232,7 @@ public final class TranscriptTail {
         let injected = (text ?? "").hasPrefix("<task-notification") || (text ?? "").hasPrefix("Another Claude session")
             || (text ?? "").hasPrefix("<system-reminder")
         if !onlyToolResults, !injected { promptAt = ts }
-        if !onlyToolResults, !injected, plan.allSatisfy(\.isDone) { plan = []; planStart = nil }   // a finished plan is replaced on the next prompt; an unfinished one carries over
+        if !onlyToolResults, !injected, plan.allSatisfy(\.isDone) { plan = []; planStart = nil; planMarks = [] }   // a finished plan is replaced on the next prompt; an unfinished one carries over
         if !onlyToolResults, firstPrompt == nil, let t = text {
             firstPrompt = Self.summarise(t)
         }
@@ -237,7 +242,10 @@ public final class TranscriptTail {
     private func handleAssistant(_ obj: [String: Any], _ ts: Date) {
         if let blocks = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] {
             for b in blocks where b["type"] as? String == "text" {
-                if let t = b["text"] as? String, t.count >= 40 { statusText = String(t.prefix(4000)); statusAt = ts }
+                if let t = b["text"] as? String, t.count >= 40 {
+                    statusText = String(t.prefix(4000)); statusAt = ts
+                    if StatedEstimate.mayContainEstimate(t) { estimateText = String(t.prefix(4000)); estimateAt = ts }
+                }
             }
             for b in blocks where b["type"] as? String == "tool_use" {
                 if let input = b["input"] as? [String: Any], let name = b["name"] as? String {
@@ -266,11 +274,24 @@ public final class TranscriptTail {
         func steps(_ arr: [[String: Any]]) -> [PlanStep] {
             arr.compactMap { d in (d["content"] as? String).map { PlanStep(content: $0, status: d["status"] as? String ?? "pending") } }
         }
+        var before = plan
+        /// A full list that shares less than half its steps with the previous one is a NEW plan: restart the pace data.
+        func startsNewPlan(_ new: [PlanStep]) {
+            guard !before.isEmpty else { return }
+            let old = Set(before.map(\.content))
+            if new.filter({ old.contains($0.content) }).count * 2 < new.count { planStart = ts; planMarks = []; before = [] }
+        }
+        func markNewlyCompleted() {
+            for (i, st) in plan.enumerated() where st.isDone {
+                let wasDone = before.indices.contains(i) && before[i].content == st.content && before[i].isDone
+                if !wasDone, !before.isEmpty { planMarks.append(ts) }       // a transition we saw, not a pre-existing state
+            }
+        }
         switch name {
         case "TodoWrite":
-            if let todos = input["todos"] as? [[String: Any]] { plan = steps(todos); if planStart == nil { planStart = ts } }
+            if let todos = input["todos"] as? [[String: Any]] { let new = steps(todos); startsNewPlan(new); plan = new; if planStart == nil { planStart = ts }; markNewlyCompleted() }
         case "mcp__ccd_turn__update_plan":
-            if let items = input["items"] as? [[String: Any]] { plan = steps(items); if planStart == nil { planStart = ts }; return }
+            if let items = input["items"] as? [[String: Any]] { let new = steps(items); startsNewPlan(new); plan = new; if planStart == nil { planStart = ts }; markNewlyCompleted(); return }
             if input["advance"] as? Bool == true {
                 if let i = plan.firstIndex(where: { $0.status == "in_progress" }) { plan[i].status = "completed" }
                 if let j = plan.firstIndex(where: { $0.status == "pending" }) { plan[j].status = "in_progress" }
@@ -279,8 +300,10 @@ public final class TranscriptTail {
                 plan[n - 1].status = "completed"
             }
             if let n = (input["start"] as? NSNumber)?.intValue, n >= 1, n <= plan.count { plan[n - 1].status = "in_progress" }
+            markNewlyCompleted()
         case "mcp__ccd_turn__wrap_up":
             for i in plan.indices where plan[i].status == "in_progress" { plan[i].status = "completed" }
+            markNewlyCompleted()
         default: break
         }
     }

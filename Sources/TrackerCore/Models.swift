@@ -112,6 +112,12 @@ public struct ReportedProgress: Identifiable {
     }
 }
 
+public struct ETA {
+    public let seconds: TimeInterval
+    /// True for a step-pace guess (shown with "~"); false for a stated or measured estimate.
+    public let approximate: Bool
+}
+
 public enum RunState: String {
     case working, background, paused, waiting, idle, finished
 }
@@ -193,24 +199,49 @@ public struct SessionInfo: Identifiable {
     /// The session's own step list (plan / TodoWrite) since the latest user prompt.
     public var plan: [PlanStep] = []
     public var planStart: Date?
+    public var planMarks: [Date] = []
     public var promptAt: Date?
     public var activity: String?
     public var activityAt: Date?
     public var statusText: String?
     public var statusAt: Date?
+    public var estimateText: String?
+    public var estimateAt: Date?
 
     /// Counts the session reported in its latest status message (recent only).
     public func reported(at now: Date) -> [ReportedProgress] {
         guard let t = statusText, let at = statusAt, now.timeIntervalSince(at) < 3 * 3600 else { return [] }
         return ReportedProgress.parse(t)
     }
-    /// The session's own stated estimate, minus the time since it said it. Used silently as the ETA when nothing is measured.
+    /// Time left according to the session's own latest stated estimate (any session), counted down from when it said it.
     public func statedRemaining(at now: Date) -> TimeInterval? {
-        guard let t = statusText, let at = statusAt, now.timeIntervalSince(at) < 3 * 3600,
-              let sentence = ReportedProgress.sessionEstimate(t), let total = ReportedProgress.estimateSeconds(sentence) else { return nil }
-        let left = total - now.timeIntervalSince(at)
-        return left > 60 ? left : nil
+        guard alive, let t = estimateText, let at = estimateAt, now.timeIntervalSince(at) < 24 * 3600 else { return nil }
+        return StatedEstimate.remaining(in: t, statusAt: at, now: now, remote: remote)
     }
+
+    /// The ETA to show, best source first: what the session itself states, then a measured rate, then (marked
+    /// approximate) the pace of its own completed steps.
+    public func eta(at now: Date) -> ETA? {
+        if let s = statedRemaining(at: now) { return ETA(seconds: s, approximate: false) }
+        if let m = progress(at: now)?.eta { return ETA(seconds: m, approximate: false) }
+        if let p = planPaceRemaining(at: now) { return ETA(seconds: p, approximate: true) }
+        return nil
+    }
+
+    /// Steps left x the average time the finished steps took. Only for sessions doing the steps themselves: with workers
+    /// or background tasks running, the remaining step is usually the long one and its pace is unrelated.
+    func planPaceRemaining(at now: Date) -> TimeInterval? {
+        guard alive, plan.count >= 2, let start = planStart, let last = planMarks.max(),
+              procs.isEmpty, runningTasks.isEmpty, feeds.isEmpty else { return nil }
+        let remaining = plan.filter { !$0.isDone }.count
+        guard remaining > 0, now.timeIntervalSince(last) < 3 * 3600 else { return nil }
+        let avg = last.timeIntervalSince(start) / Double(planMarks.count)
+        guard avg >= 30 else { return nil }
+        let current = max(avg - now.timeIntervalSince(last), avg * 0.25)      // the step in progress is part-way
+        let total = current + Double(remaining - 1) * avg
+        return total < 12 * 3600 ? total : nil
+    }
+
     public func sessionEstimate(at now: Date) -> String? {
         guard let t = statusText, let at = statusAt, now.timeIntervalSince(at) < 3 * 3600 else { return nil }
         return ReportedProgress.sessionEstimate(t)
@@ -231,7 +262,7 @@ public struct SessionInfo: Identifiable {
             return Progress(fraction: Double(f.doneTotal) / Double(f.grandTotal), eta: f.currentETA, detail: f.currentStage.map { "\($0.name) \($0.done)/\($0.total)" })
         }
         if let r = reported(at: now).first {   // the session's own count beats a coarse step count
-            return Progress(fraction: r.fraction, eta: feeds.isEmpty ? statedRemaining(at: now) : nil, detail: "\(r.done.formatted(.number.grouping(.automatic)))/\(r.total.formatted(.number.grouping(.automatic)))")
+            return Progress(fraction: r.fraction, eta: nil, detail: "\(r.done.formatted(.number.grouping(.automatic)))/\(r.total.formatted(.number.grouping(.automatic)))")
         }
         if plan.count >= 2 {
             let done = plan.filter(\.isDone).count

@@ -168,8 +168,82 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertTrue(t.finishedIDs.contains("agentB"))
     }
 
+    func testStatedEstimateLondonishWording() {
+        let said = Date(timeIntervalSince1970: 1_800_000_000)
+        let text = """
+        The fix agent started about half an hour ago, and I can't see its progress until it reports. My estimate is:
+
+        - **Fix agent:** about 2 to 3 hours in total, which means roughly 1.5 to 2.5 hours from now. Most of that is the full London road rebuild, which takes about an hour on its own.
+        - **My check and deploy:** about 30 minutes after it reports.
+        - **Re-photograph the 928 cells:** about 2 hours.
+        - **Reviews:** under an hour, partly overlapping with the photography.
+
+        That puts the Sonnet re-check at about 5 to 6 hours from now. The first useful result is the fix agent's before and after pictures, in about 2 hours.
+        """
+        let f = StatedEstimate.finish(in: text, statusAt: said, remote: true)!
+        XCTAssertEqual(f.timeIntervalSince(said), 5.5 * 3600, accuracy: 1)          // the overall finish, not the first milestone
+        let left = StatedEstimate.remaining(in: text, statusAt: said, now: said.addingTimeInterval(3600), remote: true)!
+        XCTAssertEqual(left, 4.5 * 3600, accuracy: 1)                                 // counts down
+        XCTAssertNil(StatedEstimate.remaining(in: text, statusAt: said, now: said.addingTimeInterval(7 * 3600), remote: true))   // passed
+    }
+
+    func testStatedEstimateClockTimesForLocalSessions() {
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = TimeZone.current
+        let said = cal.date(from: DateComponents(year: 2026, month: 11, day: 8, hour: 19, minute: 44))!
+        let text = "- **Follow:** 55 clips left, finishing around 20:40.\n- **ETA:** about 4½–5 hours for cab, so roughly 01:00–01:30 if nothing fails.\nThe clock reads 6:44pm."
+        let f = StatedEstimate.finish(in: text, statusAt: said, remote: false)!
+        XCTAssertEqual(f.timeIntervalSince(said), 5.5 * 3600, accuracy: 60)           // 01:15 next day (midpoint), later than 20:40
+        // A remote session's clock zone is unknown, so clock times are ignored (durations still work).
+        let r = StatedEstimate.finish(in: text, statusAt: said, remote: true)!
+        XCTAssertEqual(r.timeIntervalSince(said), 4.75 * 3600, accuracy: 1)
+    }
+
+    func testQuotedEstimatesAreIgnored() {
+        let said = Date(timeIntervalSince1970: 1_800_000_000)
+        let text = "Londonish says \"That puts the re-check at about 5 to 6 hours from now\" in its last message.\n> about 3 hours from now"
+        XCTAssertNil(StatedEstimate.finish(in: text, statusAt: said, remote: true))
+        XCTAssertNotNil(StatedEstimate.finish(in: "I expect about 3 hours from now.", statusAt: said, remote: true))
+    }
+
+    func testPlanPaceEstimate() {
+        append(line("user", "10:00:00.000", content: "\"go\""))
+        append(planLine("10:00:00.000", #"{"items":[{"content":"a","status":"in_progress"},{"content":"b","status":"pending"},{"content":"c","status":"pending"},{"content":"d","status":"pending"},{"content":"e","status":"pending"}]}"#))
+        append(planLine("10:10:00.000", #"{"advance":true}"#))
+        append(planLine("10:20:00.000", #"{"advance":true}"#))
+        // A different list replaces the plan: pace data restarts.
+        let t0 = TranscriptTail(path: path); t0.advance()
+        XCTAssertEqual(t0.planMarks.count, 2)
+        append(planLine("10:21:00.000", #"{"items":[{"content":"x","status":"in_progress"},{"content":"y","status":"pending"}]}"#))
+        t0.advance()
+        XCTAssertEqual(t0.planMarks.count, 0)
+        XCTAssertEqual(t0.planStart, ISO8601DateFormatter.fractional.date(from: "2026-01-01T10:21:00.000Z"))
+        try? FileManager.default.removeItem(atPath: path)
+        append(line("user", "10:00:00.000", content: "\"go\""))
+        append(planLine("10:00:00.000", #"{"items":[{"content":"a","status":"in_progress"},{"content":"b","status":"pending"},{"content":"c","status":"pending"},{"content":"d","status":"pending"},{"content":"e","status":"pending"}]}"#))
+        append(planLine("10:10:00.000", #"{"advance":true}"#))
+        append(planLine("10:20:00.000", #"{"advance":true}"#))
+        let t = TranscriptTail(path: path); t.advance()
+        XCTAssertEqual(t.planMarks.count, 2)                      // two completions seen as transitions
+        let iso = ISO8601DateFormatter(); iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let now = iso.date(from: "2026-01-01T10:25:00.000Z")!
+        var s = SessionInfo(id: "s", pid: 1, cwd: "/x", branch: nil, title: "t", start: now.addingTimeInterval(-3600),
+                            lastActivity: now.addingTimeInterval(-60), busySince: now.addingTimeInterval(-300), stateSince: now.addingTimeInterval(-300),
+                            workedClosed: 0, alive: true, subagents: [])
+        s.plan = t.plan; s.planStart = t.planStart; s.planMarks = t.planMarks
+        // 10 min per step so far; current step 5 min in -> ~5 left on it + 2 more steps = 25 min.
+        let e = s.eta(at: now)!
+        XCTAssertTrue(e.approximate)
+        XCTAssertEqual(e.seconds, 25 * 60, accuracy: 1)
+        s.procs = [SubProcess(id: 1, label: "worker", elapsed: 60, progress: nil, progressText: nil)]
+        XCTAssertNil(s.eta(at: now))                              // workers running: step pace is not meaningful
+    }
+
     func testFormat() {
         XCTAssertEqual(formatDuration(4320, compact: true), "1h12m")
         XCTAssertEqual(formatDuration(192), "3m12s")
     }
+}
+
+private extension ISO8601DateFormatter {
+    static let fractional: ISO8601DateFormatter = { let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f }()
 }

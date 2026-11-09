@@ -253,15 +253,17 @@ public struct SessionInfo: Identifiable {
         let since = busySince != nil ? lastActivity : stateSince
         return now.timeIntervalSince(since) < Tuning.idleAfter ? .waiting : .idle
     }
-    /// A background command is open or a progress feed is being refreshed.
+    /// A background command is open, subagents are running, or a progress feed is being refreshed: the session has
+    /// handed work off and is waiting on it, even though its own turn has ended.
     public func hasPendingWork(at now: Date) -> Bool {
-        alive && (!runningTasks.isEmpty || feeds.contains(where: { $0.isFresh(at: now) }))
+        alive && (!runningTasks.isEmpty || runningAgents(at: now) > 0 || feeds.contains(where: { $0.isFresh(at: now) }))
     }
 
     public func timeInState(at now: Date) -> TimeInterval {
         switch state(at: now) {
         case .working: return now.timeIntervalSince(stateSince)
         case .background:
+            if let oldest = procs.map(\.elapsed).max() { return oldest }   // live workers beat an old waiter task
             return now.timeIntervalSince(([runningTasks.map(\.start).min(), feeds.filter { $0.isFresh(at: now) }.map(\.started).min()].compactMap { $0 }).min() ?? lastActivity)
         case .paused: return now.timeIntervalSince(busySince != nil ? lastActivity : stateSince)
         case .waiting, .idle: return now.timeIntervalSince(busySince != nil ? lastActivity : stateSince)
@@ -281,7 +283,7 @@ public struct SessionInfo: Identifiable {
 public enum Tuning {
     /// A mid-turn session with no transcript writes for this long is treated as blocked on the user.
     public static let sessionStaleAfter: TimeInterval = 15 * 60
-    public static let subagentStaleAfter: TimeInterval = 5 * 60
+    public static let subagentStaleAfter: TimeInterval = 30 * 60   // an agent can sit in one long tool call
     /// Waiting this long becomes "idle".
     public static let idleAfter: TimeInterval = 10 * 60
 }

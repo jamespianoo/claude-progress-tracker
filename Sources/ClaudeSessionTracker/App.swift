@@ -7,6 +7,12 @@ struct ClaudeSessionTrackerApp: App {
 
     init() {
         // `ClaudeSessionTracker --dump` prints the current picture and exits (for verification).
+        // `--probe file.jsonl` prints how one transcript is parsed (debugging).
+        if let i = CommandLine.arguments.firstIndex(of: "--probe"), i + 1 < CommandLine.arguments.count {
+            let t = TranscriptTail(path: CommandLine.arguments[i + 1]); t.advance()
+            print("first \(String(describing: t.firstTimestamp))\nlast \(String(describing: t.lastTimestamp))\nbusySince \(String(describing: t.busySince))\nstateSince \(String(describing: t.stateSince))\nactivity \(t.activity ?? "-")\nplan \(t.plan.count)")
+            exit(0)
+        }
         if CommandLine.arguments.contains("--dump") {
             let t0 = Date()
             let rows = SessionStore().refresh()

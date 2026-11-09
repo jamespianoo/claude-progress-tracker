@@ -75,6 +75,7 @@ struct ContentView: View {
             }.padding(.horizontal, 12).padding(.vertical, 8)
         }
         .frame(width: Grid.width)
+        .background(WindowTopAnchor())
         .onAppear { model.popoverVisible = true; model.requestNotificationAuth() }
         .onDisappear { model.popoverVisible = false }
     }
@@ -268,5 +269,35 @@ struct IdleRow: View {
             Spacer(minLength: 8)
             Text(formatDuration(session.timeInState(at: now), compact: true)).monospacedDigit()
         }.font(.caption).foregroundStyle(.secondary)
+    }
+}
+
+/// Keeps the menu-bar popover pinned just under the menu bar. AppKit resizes a window from its bottom-left corner, so
+/// when the content shrinks while the popover is open (a session finishes) the top edge would otherwise drop and the
+/// popover "hangs" below the bar. After every resize or show, put the top edge back under the menu bar.
+struct WindowTopAnchor: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { AnchorView() }
+    func updateNSView(_ view: NSView, context: Context) {}
+
+    final class AnchorView: NSView {
+        private var observers: [NSObjectProtocol] = []
+        deinit { observers.forEach(NotificationCenter.default.removeObserver) }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            observers.forEach(NotificationCenter.default.removeObserver); observers = []
+            guard let w = window, w.level != .normal else { return }   // only the status-bar popover, not ordinary windows
+            let nc = NotificationCenter.default
+            for name in [NSWindow.didResizeNotification, NSWindow.didBecomeKeyNotification, NSWindow.didChangeScreenNotification] {
+                observers.append(nc.addObserver(forName: name, object: w, queue: .main) { [weak w] _ in Self.pin(w) })
+            }
+            DispatchQueue.main.async { [weak w] in Self.pin(w) }
+        }
+
+        static func pin(_ w: NSWindow?) {
+            guard let w, let screen = w.screen ?? NSScreen.main else { return }
+            let top = screen.visibleFrame.maxY - 2          // visibleFrame ends at the bottom of the menu bar
+            if abs(w.frame.maxY - top) > 0.5 { w.setFrameTopLeftPoint(NSPoint(x: w.frame.minX, y: top)) }
+        }
     }
 }

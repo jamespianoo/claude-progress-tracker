@@ -127,6 +127,21 @@ final class TranscriptTailTests: XCTestCase {
         XCTAssertNil(ReportedProgress.estimateSeconds("finishing around 20:40"))
     }
 
+    func testSessionWaitingOnAgentsCountsAsBackground() {
+        let now = Date()
+        func session(agentRunning: Bool) -> SessionInfo {
+            let a = SubagentInfo(id: "a", description: "fix", agentType: "x", start: now.addingTimeInterval(-600),
+                                 lastActivity: now.addingTimeInterval(agentRunning ? -60 : -7200), busy: true, workedClosed: 0)
+            var s = SessionInfo(id: "s", pid: 0, cwd: "/x", branch: nil, title: "t", start: now.addingTimeInterval(-9000),
+                                lastActivity: now.addingTimeInterval(-30), busySince: nil, stateSince: now.addingTimeInterval(-30),
+                                workedClosed: 0, alive: true, subagents: [a])
+            s.remote = true
+            return s
+        }
+        XCTAssertEqual(session(agentRunning: true).state(at: now), .background)   // turn ended, agents still working
+        XCTAssertNotEqual(session(agentRunning: false).state(at: now), .background)
+    }
+
     func testFormat() {
         XCTAssertEqual(formatDuration(4320, compact: true), "1h12m")
         XCTAssertEqual(formatDuration(192), "3m12s")
